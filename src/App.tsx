@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Archive,
   Ban,
+  BellOff,
   Check,
   ChevronDown,
   Copy,
@@ -23,6 +24,7 @@ import {
   ShieldCheck,
   Smartphone,
   Trash2,
+  UserPlus,
   Users,
   X
 } from 'lucide-react'
@@ -53,6 +55,7 @@ import { SettingsDialog } from './components/SettingsDialog'
 import { authEmailForUsername, generateUsername, getPasswordRequirements, isValidUsername, recipientHandleFromPath, registrationErrorMessage, validatePassword } from './lib/auth'
 import { identityFingerprint } from './lib/crypto'
 import {
+  addGroupMembers,
   blockUser,
   clearConversation,
   deleteDirectConversationForEveryone,
@@ -78,6 +81,7 @@ const supabasePublishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || 
 
 type AuthMode = 'login' | 'register'
 type ThemePreference = 'system' | 'light' | 'dark'
+type ContactOption = { userId: string; username: string; displayName: string }
 
 function messageFromError(reason: unknown): string {
   return reason instanceof Error ? reason.message : 'Something went wrong. Please try again.'
@@ -99,6 +103,30 @@ function loadConversationNicknames(userId: string): { values: Record<string, str
     return { values: Object.fromEntries(validEntries), error: '' }
   } catch (reason) {
     return { values: {}, error: `Could not load local conversation nicknames: ${messageFromError(reason)}` }
+  }
+}
+
+function loadUnreadCounts(userId: string): Record<string, number> {
+  try {
+    const saved = window.localStorage.getItem(`sloppy-unread:${userId}`)
+    if (!saved) return {}
+    const parsed: unknown = JSON.parse(saved)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, number] => (
+      typeof entry[1] === 'number' && Number.isFinite(entry[1]) && entry[1] > 0
+    )))
+  } catch {
+    return {}
+  }
+}
+
+function loadMutedConversationIds(userId: string): string[] {
+  try {
+    const saved = window.localStorage.getItem(`sloppy-muted-conversations:${userId}`)
+    const parsed: unknown = saved ? JSON.parse(saved) : []
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []
+  } catch {
+    return []
   }
 }
 
@@ -524,6 +552,7 @@ function Workspace({
   const [nicknameConversationId, setNicknameConversationId] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [actionConversationId, setActionConversationId] = useState('')
+  const [addingGroupMembersToId, setAddingGroupMembersToId] = useState('')
   const [notificationsEnabled, setNotificationsEnabled] = useState(() => (
     window.localStorage.getItem(`sloppy-notifications:${userId}`) === 'true'
   ))
@@ -849,9 +878,25 @@ function Workspace({
   const selectedConversation = conversations.find((conversation) => conversation.id === selectedId)
   const editingNicknameConversation = conversations.find((conversation) => conversation.id === nicknameConversationId)
   const actionConversation = conversations.find((conversation) => conversation.id === actionConversationId)
+  const addingGroupMembersTo = conversations.find((conversation) => conversation.id === addingGroupMembersToId)
   const savedNicknames = nicknameStorage.values
   const pendingCount = deviceState.pendingDevices.length
   const visibleConversations = conversations.filter((conversation) => !conversationPreferences[conversation.id]?.hidden_at)
+  const acceptedContacts = [...new Map(conversations
+    .filter((conversation) => conversation.kind === 'direct')
+    .flatMap((conversation) => conversation.conversation_members
+      .filter((member) => member.user_id !== userId)
+      .map((member) => {
+        const handle = memberUsername(member)
+        if (!handle) return null
+        return [member.user_id, {
+          userId: member.user_id,
+          username: handle,
+          displayName: memberDisplayName(member) ?? handle
+        }] as const
+      })
+      .filter((entry): entry is readonly [string, ContactOption] => entry !== null))
+  ).values()]
 
   function saveConversationNickname(conversationId: string, nickname: string) {
     const next = { ...nicknameStorage.values }
@@ -945,6 +990,12 @@ function Workspace({
       setMobileChatOpen(false)
     }
     await refreshConversations()
+  }
+
+  async function addMembersToGroup(conversation: Conversation, userIds: string[]) {
+    await addGroupMembers(client, conversation.id, userIds)
+    await refreshConversations()
+    setAddingGroupMembersToId('')
   }
 
   return (
@@ -1103,12 +1154,7 @@ function Workspace({
       {newChatOpen && (
         <NewConversationDialog
           initialHandle={requestedHandle ?? ''}
-          acceptedHandles={conversations
-            .filter((conversation) => conversation.kind === 'direct')
-            .flatMap((conversation) => conversation.conversation_members
-              .filter((member) => member.user_id !== userId)
-              .map(memberUsername)
-              .filter((handle): handle is string => Boolean(handle)))}
+          acceptedContacts={acceptedContacts}
           onClose={() => {
             setNewChatOpen(false)
             clearRequestedHandleFromPath()
@@ -1177,6 +1223,10 @@ function Workspace({
           currentUserId={userId}
           nickname={savedNicknames[actionConversation.id] ?? ''}
           onBlock={(targetUserId) => blockConversationUser(actionConversation, targetUserId)}
+          onAddMembers={() => {
+            setActionConversationId('')
+            setAddingGroupMembersToId(actionConversation.id)
+          }}
           onClear={() => clearConversationForMe(actionConversation)}
           onClose={() => setActionConversationId('')}
           onDeleteForEveryone={() => deleteConversationForEveryone(actionConversation)}
@@ -1185,6 +1235,14 @@ function Workspace({
             setActionConversationId('')
             setNicknameConversationId(actionConversation.id)
           }}
+        />
+      )}
+      {addingGroupMembersTo && (
+        <AddGroupMembersDialog
+          availableContacts={acceptedContacts.filter((contact) => !addingGroupMembersTo.conversation_members.some((member) => member.user_id === contact.userId))}
+          currentMemberCount={addingGroupMembersTo.conversation_members.length}
+          onAdd={(userIds) => addMembersToGroup(addingGroupMembersTo, userIds)}
+          onClose={() => setAddingGroupMembersToId('')}
         />
       )}
     </main>
@@ -1778,11 +1836,102 @@ function MessageRequestsDialog({
   )
 }
 
+function AddGroupMembersDialog({
+  availableContacts,
+  currentMemberCount,
+  onAdd,
+  onClose
+}: {
+  availableContacts: ContactOption[]
+  currentMemberCount: number
+  onAdd: (userIds: string[]) => Promise<void>
+  onClose: () => void
+}) {
+  const [search, setSearch] = useState('')
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const capacity = Math.max(0, 20 - currentMemberCount)
+  const filteredContacts = availableContacts.filter((contact) => (
+    `${contact.displayName} ${contact.username}`.toLowerCase().includes(search.trim().toLowerCase())
+  ))
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (selectedIds.length === 0) {
+      setError('Choose at least one member to add.')
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      await onAdd(selectedIds)
+    } catch (reason) {
+      setError(messageFromError(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <DialogFrame onClose={onClose}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><UserPlus size={19} /></div>
+          <h2 className="mt-3 text-xl font-semibold">Add group members</h2>
+          <p className="mt-1 text-sm text-md3-onSurfaceVariant">Choose accepted contacts. Group chats support up to 20 members.</p>
+        </div>
+        <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+      </div>
+      <form className="mt-5 space-y-4" onSubmit={(event) => void submit(event)}>
+        <input
+          autoFocus
+          aria-label="Search accepted contacts"
+          className="w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 text-sm"
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search names or handles"
+          value={search}
+        />
+        <div className="max-h-64 space-y-1 overflow-y-auto rounded-2xl bg-md3-surfaceContainerLow p-2">
+          {filteredContacts.length === 0 ? (
+            <p className="px-3 py-5 text-center text-sm text-md3-onSurfaceVariant">No eligible accepted contacts.</p>
+          ) : filteredContacts.map((contact) => {
+            const checked = selectedIds.includes(contact.userId)
+            const atCapacity = currentMemberCount + selectedIds.length >= 20
+            return (
+              <label className={`flex items-center gap-3 rounded-xl px-3 py-2.5 ${atCapacity && !checked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:bg-md3-surface'}`} key={contact.userId}>
+                <input
+                  checked={checked}
+                  className="h-4 w-4 accent-[rgb(var(--md3-primary))]"
+                  disabled={atCapacity && !checked}
+                  onChange={(event) => setSelectedIds((current) => event.target.checked
+                    ? [...current, contact.userId]
+                    : current.filter((id) => id !== contact.userId))}
+                  type="checkbox"
+                />
+                <span className="min-w-0 flex-1 truncate text-sm font-medium">{contact.displayName}</span>
+                <code className="truncate text-xs text-md3-onSurfaceVariant">{contact.username}</code>
+              </label>
+            )
+          })}
+        </div>
+        <p className="text-xs text-md3-onSurfaceVariant">{selectedIds.length} selected · {capacity} spots available</p>
+        {error && <p className="rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{error}</p>}
+        <button className="flex w-full items-center justify-center gap-2 rounded-full bg-md3-primary px-4 py-3 font-semibold text-md3-onPrimary disabled:opacity-60" disabled={busy || selectedIds.length === 0} type="submit">
+          {busy ? <LoaderCircle className="animate-spin" size={17} /> : <UserPlus size={17} />}
+          Add {selectedIds.length || ''} {selectedIds.length === 1 ? 'member' : 'members'}
+        </button>
+      </form>
+    </DialogFrame>
+  )
+}
+
 function ConversationActionsDialog({
   conversation,
   currentUserId,
   nickname,
   onBlock,
+  onAddMembers,
   onClear,
   onClose,
   onDeleteForEveryone,
@@ -1793,6 +1942,7 @@ function ConversationActionsDialog({
   currentUserId: string
   nickname: string
   onBlock: (userId: string) => Promise<void>
+  onAddMembers: () => void
   onClear: () => Promise<void>
   onClose: () => void
   onDeleteForEveryone: () => Promise<void>
@@ -1826,6 +1976,7 @@ function ConversationActionsDialog({
         <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
       </div>
       <div className="mt-5 grid gap-2">
+        {conversation.kind === 'group' && <button className="flex items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={onAddMembers} type="button"><UserPlus size={17} /> Add members</button>}
         <button className="flex items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={onRename} type="button"><Pencil size={17} /> Rename for me</button>
         <button className="flex items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={() => {
           if (window.confirm('Clear your visible history for this conversation? Other participants will keep their messages.')) {
@@ -1939,33 +2090,51 @@ function NicknameDialog({
 
 function NewConversationDialog({
   initialHandle,
-  acceptedHandles,
+  acceptedContacts,
   onClose,
   onCreate
 }: {
   initialHandle: string
-  acceptedHandles: string[]
+  acceptedContacts: ContactOption[]
   onClose: () => void
   onCreate: (usernames: string[], title: string, firstMessage: string) => Promise<void>
 }) {
+  const [mode, setMode] = useState<'direct' | 'group'>('direct')
   const [handles, setHandles] = useState(initialHandle)
   const [title, setTitle] = useState('')
   const [firstMessage, setFirstMessage] = useState('')
+  const [contactSearch, setContactSearch] = useState('')
+  const [selectedContactIds, setSelectedContactIds] = useState<string[]>([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const usernames = handles.split(',').map((handle) => handle.trim().toLowerCase()).filter(Boolean)
-  const isDirectRequest = usernames.length === 1
-  const isExistingConversation = isDirectRequest && acceptedHandles.includes(usernames[0])
+  const usernames = mode === 'group'
+    ? acceptedContacts.filter((contact) => selectedContactIds.includes(contact.userId)).map((contact) => contact.username)
+    : handles.split(',').map((handle) => handle.trim().toLowerCase()).filter(Boolean)
+  const isDirectRequest = mode === 'direct' && usernames.length === 1
+  const isExistingConversation = isDirectRequest && acceptedContacts.some((contact) => contact.username === usernames[0])
+  const filteredContacts = acceptedContacts.filter((contact) => (
+    `${contact.displayName} ${contact.username}`.toLowerCase().includes(contactSearch.trim().toLowerCase())
+  ))
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setError('')
-    const names = handles.split(',').map((handle) => handle.trim().toLowerCase()).filter(Boolean)
+    const names = mode === 'group'
+      ? acceptedContacts.filter((contact) => selectedContactIds.includes(contact.userId)).map((contact) => contact.username)
+      : handles.split(',').map((handle) => handle.trim().toLowerCase()).filter(Boolean)
+    if (mode === 'group' && names.length < 2) {
+      setError('Choose at least two accepted contacts for a group.')
+      return
+    }
     if (names.length === 0) {
       setError('Enter at least one Sloppy username.')
       return
     }
     if (names.some((name) => !isValidUsername(name))) {
       setError('Every username must be 12 characters.')
+      return
+    }
+    if (mode === 'direct' && names.length !== 1) {
+      setError('Enter one handle for a direct conversation.')
       return
     }
     if (names.length === 1 && !firstMessage.trim()) {
@@ -1998,45 +2167,84 @@ function NewConversationDialog({
         <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
       </div>
       <form className="mt-6 space-y-4" onSubmit={submit}>
-        <label className="block text-sm font-medium">
-          Sloppy usernames
-          <input
-            autoFocus
-            className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
-            onChange={(event) => setHandles(event.target.value)}
-            placeholder="Enter one or more handles"
-            required
-            value={handles}
-          />
-        </label>
-        {isDirectRequest ? (
-          <label className="block text-sm font-medium">
-            {isExistingConversation ? 'Message' : 'First message'}
-            <textarea
-              className="mt-2 min-h-28 w-full resize-y rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
-              maxLength={4000}
-              onChange={(event) => setFirstMessage(event.target.value)}
-              placeholder={isExistingConversation ? 'Write an encrypted message' : 'Write a short introduction'}
-              required
-              value={firstMessage}
-            />
-          </label>
-        ) : usernames.length > 1 ? (
-          <label className="block text-sm font-medium">
-            Group name <span className="font-normal text-md3-onSurfaceVariant">(optional)</span>
-            <input
-              className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
-              maxLength={80}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder="Name this group"
-              value={title}
-            />
-          </label>
-        ) : null}
+        <div aria-label="Conversation type" className="grid grid-cols-2 rounded-2xl bg-md3-surfaceContainerLow p-1" role="group">
+          <button aria-pressed={mode === 'direct'} className={`rounded-xl px-4 py-2.5 text-sm font-semibold ${mode === 'direct' ? 'bg-md3-surface text-md3-onSurface shadow-sm' : 'text-md3-onSurfaceVariant'}`} onClick={() => setMode('direct')} type="button">Direct</button>
+          <button aria-pressed={mode === 'group'} className={`rounded-xl px-4 py-2.5 text-sm font-semibold ${mode === 'group' ? 'bg-md3-surface text-md3-onSurface shadow-sm' : 'text-md3-onSurfaceVariant'}`} onClick={() => setMode('group')} type="button">Group</button>
+        </div>
+        {mode === 'direct' ? (
+          <>
+            <label className="block text-sm font-medium">
+              Sloppy handle
+              <input
+                autoFocus
+                className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+                onChange={(event) => setHandles(event.target.value)}
+                placeholder="Enter a handle"
+                required
+                value={handles}
+              />
+            </label>
+            {isDirectRequest && (
+              <label className="block text-sm font-medium">
+                {isExistingConversation ? 'Message' : 'First message'}
+                <textarea
+                  className="mt-2 min-h-28 w-full resize-y rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+                  maxLength={4000}
+                  onChange={(event) => setFirstMessage(event.target.value)}
+                  placeholder={isExistingConversation ? 'Write an encrypted message' : 'Write a short introduction'}
+                  required
+                  value={firstMessage}
+                />
+              </label>
+            )}
+          </>
+        ) : (
+          <>
+            <label className="block text-sm font-medium">
+              Find accepted contacts
+              <input
+                autoComplete="off"
+                className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+                onChange={(event) => setContactSearch(event.target.value)}
+                placeholder="Search names or handles"
+                value={contactSearch}
+              />
+            </label>
+            <div className="max-h-56 space-y-1 overflow-y-auto rounded-2xl bg-md3-surfaceContainerLow p-2">
+              {filteredContacts.length === 0 ? (
+                <p className="px-3 py-4 text-center text-sm text-md3-onSurfaceVariant">No accepted contacts found.</p>
+              ) : filteredContacts.map((contact) => (
+                <label className="flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2.5 hover:bg-md3-surface" key={contact.userId}>
+                  <input
+                    checked={selectedContactIds.includes(contact.userId)}
+                    className="h-4 w-4 accent-[rgb(var(--md3-primary))]"
+                    onChange={(event) => setSelectedContactIds((current) => event.target.checked
+                      ? [...current, contact.userId]
+                      : current.filter((id) => id !== contact.userId))}
+                    type="checkbox"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium">{contact.displayName}</span>
+                  <code className="truncate text-xs text-md3-onSurfaceVariant">{contact.username}</code>
+                </label>
+              ))}
+            </div>
+            <p className="text-xs text-md3-onSurfaceVariant">{selectedContactIds.length} selected · Select at least 2. Contacts must already have accepted a direct request.</p>
+            <label className="block text-sm font-medium">
+              Group name <span className="font-normal text-md3-onSurfaceVariant">(optional)</span>
+              <input
+                className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+                maxLength={80}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="Name this group"
+                value={title}
+              />
+            </label>
+          </>
+        )}
         {error && <p className="rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{error}</p>}
         <button className="flex w-full items-center justify-center gap-2 rounded-full bg-md3-primary px-5 py-3.5 font-semibold text-md3-onPrimary disabled:opacity-60" disabled={busy} type="submit">
           {busy ? <LoaderCircle className="animate-spin" size={18} /> : <Plus size={18} />}
-          {isExistingConversation ? 'Send message' : isDirectRequest ? 'Send message request' : 'Create group'}
+          {mode === 'group' ? 'Create group' : isExistingConversation ? 'Send message' : 'Send message request'}
         </button>
       </form>
     </DialogFrame>

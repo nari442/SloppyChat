@@ -62,7 +62,7 @@ Set these in your local environment (for example `.env.local`) or your hosting p
 
 The app requires the existing Sloppy schema and RLS policies. The original bootstrap files are not included in this repository.
 
-For an existing Sloppy deployment, run `database/005_display_names.sql`, `database/006_rate_limits.sql`, and `database/007_profile_self_repair.sql` once each in the Supabase SQL Editor. Migration 007 also repairs a missing profile row for the authenticated account from its validated signup handle metadata. Refresh the PostgREST schema if prompted.
+Run `fix_groups_and_request_retries.sql` once in the Supabase SQL Editor to enable adding accepted contacts to existing groups and to allow new message requests after a recipient has denied an earlier request. Blocked users remain unable to send requests. Group members must already have an accepted direct conversation with the person creating or expanding the group.
 
 ### 4. Run
 

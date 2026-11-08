@@ -73,3 +73,20 @@ export async function loadBlockedUsers(client: SupabaseClient): Promise<BlockedU
 export async function unblockUser(client: SupabaseClient, userId: string): Promise<void> {
   await callConversationAction(client, 'remove_user_block', { target_user_id: userId }, 'unblock this user')
 }
+
+export async function addGroupMembers(client: SupabaseClient, conversationId: string, userIds: string[]): Promise<number> {
+  if (userIds.length === 0) {
+    throw new Error('Choose at least one member to add.')
+  }
+  const { data, error } = await client.rpc('add_group_members', {
+    target_conversation_id: conversationId,
+    requested_user_ids: userIds
+  })
+  if (error) {
+    throw new Error(`Could not add group members: ${error.message}`)
+  }
+  if (typeof data !== 'number') {
+    throw new Error('The group membership update did not return a result.')
+  }
+  return data
+}
