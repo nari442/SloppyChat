@@ -7,6 +7,7 @@ import {
   ChevronDown,
   Copy,
   Eraser,
+  Github,
   ImagePlus,
   LoaderCircle,
   LockKeyhole,
@@ -31,6 +32,7 @@ import {
   decryptRealtimeMessage,
   loadConversations,
   loadMessages,
+  memberDisplayName,
   memberUsername,
   sendMessage,
   type ChatMessage,
@@ -48,7 +50,7 @@ import { conversationMemberNames } from './lib/conversation-label'
 import { ConversationLabel } from './components/ConversationLabel'
 import { Handle } from './components/Handle'
 import { SettingsDialog } from './components/SettingsDialog'
-import { authEmailForUsername, generateUsername, getPasswordRequirements, isValidUsername, registrationErrorMessage, validatePassword } from './lib/auth'
+import { authEmailForUsername, generateUsername, getPasswordRequirements, isValidUsername, recipientHandleFromPath, registrationErrorMessage, validatePassword } from './lib/auth'
 import { identityFingerprint } from './lib/crypto'
 import {
   blockUser,
@@ -123,6 +125,7 @@ const supabaseConfiguration = (() => {
 })()
 
 function App() {
+  const requestedHandle = recipientHandleFromPath(window.location.pathname)
   const [theme, setTheme] = useState<ThemePreference>(() => {
     const saved = window.localStorage.getItem('sloppy-theme-preference')
     return saved === 'light' || saved === 'dark' ? saved : 'system'
@@ -191,7 +194,7 @@ function App() {
   } else if (!session) {
     screen = <AuthScreen client={client} />
   } else {
-    screen = <Workspace client={client} session={session} theme={theme} onThemeChange={setTheme} />
+    screen = <Workspace client={client} session={session} theme={theme} onThemeChange={setTheme} requestedHandle={requestedHandle} />
   }
 
   return <>{screen}</>
@@ -240,6 +243,7 @@ function LoadingScreen({ label }: { label: string }) {
 function AuthScreen({ client }: { client: SupabaseClient }) {
   const [mode, setMode] = useState<AuthMode>('login')
   const [username, setUsername] = useState('')
+  const [displayName, setDisplayName] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [generatedUsername, setGeneratedUsername] = useState('')
@@ -266,7 +270,7 @@ function AuthScreen({ client }: { client: SupabaseClient }) {
         const { data, error: signUpError } = await client.auth.signUp({
           email: authEmailForUsername(newUsername),
           password,
-          options: { data: { username: newUsername } }
+          options: { data: { username: newUsername, display_name: displayName.trim() || newUsername } }
         })
         if (signUpError) {
           throw new Error(registrationErrorMessage(signUpError.message))
@@ -274,6 +278,7 @@ function AuthScreen({ client }: { client: SupabaseClient }) {
         setUsername('')
         setPassword('')
         setConfirmPassword('')
+        setDisplayName('')
         if (!data.session) {
           setNotice('Account created. Disable email confirmations in Supabase Auth to continue without an email address.')
         } else {
@@ -318,6 +323,17 @@ function AuthScreen({ client }: { client: SupabaseClient }) {
         <form className="mt-7 space-y-4" onSubmit={submit}>
           {isRegister ? (
             <>
+              <label className="block text-sm font-medium text-md3-onSurface">
+                Preferred name <span className="font-normal text-md3-onSurfaceVariant">(optional)</span>
+                <input
+                  autoComplete="name"
+                  className="auth-input mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3.5 outline-none transition focus:border-md3-primary focus:ring-4 focus:ring-md3-primary/10"
+                  maxLength={40}
+                  onChange={(event) => setDisplayName(event.target.value)}
+                  placeholder="Defaults to your generated handle"
+                  value={displayName}
+                />
+              </label>
               <label className="block text-sm font-medium text-md3-onSurface">
                 Password
                 <input
@@ -403,6 +419,15 @@ function AuthScreen({ client }: { client: SupabaseClient }) {
             {isRegister ? 'Sign in' : 'Create account'}
           </button>
         </div>
+        <a
+          className="mt-4 flex flex-col items-center gap-1 text-xs text-md3-onSurfaceVariant transition hover:text-md3-primary"
+          href="https://github.com/nari442/SloppyChat"
+          rel="noreferrer"
+          target="_blank"
+        >
+          <span className="inline-flex items-center gap-1.5 font-semibold"><Github size={14} /> Open source on GitHub</span>
+          <span>Free to use, modify, and share under the MIT License</span>
+        </a>
       </section>
     </main>
   )
@@ -467,15 +492,18 @@ function Workspace({
   client,
   session,
   theme,
-  onThemeChange
+  onThemeChange,
+  requestedHandle
 }: {
   client: SupabaseClient
   session: Session
   theme: ThemePreference
   onThemeChange: (theme: ThemePreference) => void
+  requestedHandle: string | null
 }) {
   const userId = session.user.id
   const [username, setUsername] = useState('')
+  const [displayName, setDisplayName] = useState('')
   const [deviceState, setDeviceState] = useState<DeviceState | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [conversationPreferences, setConversationPreferences] = useState<Record<string, ConversationPreference>>({})
@@ -483,7 +511,7 @@ function Workspace({
   const [loading, setLoading] = useState(true)
   const [nicknameStorage, setNicknameStorage] = useState(() => loadConversationNicknames(userId))
   const [error, setError] = useState(nicknameStorage.error)
-  const [newChatOpen, setNewChatOpen] = useState(false)
+  const [newChatOpen, setNewChatOpen] = useState(Boolean(requestedHandle))
   const [messageRequestsOpen, setMessageRequestsOpen] = useState(false)
   const [messageRequests, setMessageRequests] = useState<IncomingMessageRequest[]>([])
   const [devicesOpen, setDevicesOpen] = useState(false)
@@ -504,18 +532,20 @@ function Workspace({
       try {
         const { data, error: profileError } = await client
           .from('profiles')
-          .select('username')
+          .select('username, display_name')
           .eq('id', userId)
           .single()
         if (profileError) {
           throw new Error(profileError.message)
         }
         const handle = (data as { username: string }).username
+        const preferredName = (data as { display_name?: string | null }).display_name ?? handle
         const nextDeviceState = await activateOrRequestDevice(client, userId, handle)
         if (!active) {
           return
         }
         setUsername(handle)
+        setDisplayName(preferredName || handle)
         setDeviceState(nextDeviceState)
         if (nextDeviceState.status === 'active') {
           const [nextConversations, preferences] = await Promise.all([
@@ -723,6 +753,9 @@ function Workspace({
   async function startConversation(handles: string[], title: string, firstMessage: string) {
     if (handles.length === 1) {
       const handle = handles[0]
+      if (handle === username) {
+        throw new Error('You cannot start a conversation with your own handle.')
+      }
       const existing = conversations.find((conversation) => (
         conversation.kind === 'direct'
         && conversation.conversation_members.some((member) => memberUsername(member) === handle)
@@ -741,6 +774,7 @@ function Workspace({
         )
         await refreshConversations(existing.id)
         setNewChatOpen(false)
+        clearRequestedHandleFromPath()
         return
       }
       if (!deviceState || deviceState.status !== 'active') {
@@ -749,11 +783,17 @@ function Workspace({
       await sendMessageRequest(client, handle, userId, username, deviceState.vault, firstMessage)
       setMessageRequests(await loadIncomingMessageRequests(client))
       setNewChatOpen(false)
+      clearRequestedHandleFromPath()
       return
     }
     const id = await createConversation(client, handles, title)
     await refreshConversations(id)
     setNewChatOpen(false)
+    clearRequestedHandleFromPath()
+  }
+
+  function clearRequestedHandleFromPath() {
+    if (requestedHandle) window.history.replaceState({}, '', '/')
   }
 
   async function handleMessageRequest(request: IncomingMessageRequest, action: 'accept' | 'deny' | 'block') {
@@ -1061,13 +1101,17 @@ function Workspace({
       </div>
       {newChatOpen && (
         <NewConversationDialog
+          initialHandle={requestedHandle ?? ''}
           acceptedHandles={conversations
             .filter((conversation) => conversation.kind === 'direct')
             .flatMap((conversation) => conversation.conversation_members
               .filter((member) => member.user_id !== userId)
               .map(memberUsername)
               .filter((handle): handle is string => Boolean(handle)))}
-          onClose={() => setNewChatOpen(false)}
+          onClose={() => {
+            setNewChatOpen(false)
+            clearRequestedHandleFromPath()
+          }}
           onCreate={startConversation}
         />
       )}
@@ -1120,7 +1164,9 @@ function Workspace({
               .catch((reason: unknown) => setError(messageFromError(reason)))
           }}
           onThemeChange={onThemeChange}
+          onDisplayNameChange={setDisplayName}
           theme={theme}
+          displayName={displayName}
           username={username}
         />
       )}
@@ -1252,12 +1298,13 @@ function ChatRoom({
           })
           const expectedPeers = conversation.conversation_members.filter((member) => member.user_id !== session.user.id)
           const identities = await Promise.all(expectedPeers.map(async (member) => {
+            const displayName = memberDisplayName(member)
             const userDevices = devices.filter((candidate) => candidate.userId === member.user_id)
             const device = userDevices[0]
             if (!device) {
               return {
                 userId: member.user_id,
-                username: memberUsername(member) ?? 'Group member',
+                username: displayName ?? 'Group member',
                 fingerprint: '',
                 status: 'missing' as const
               }
@@ -1267,7 +1314,7 @@ function ChatRoom({
             if (new Set(fingerprints).size !== 1) {
               return {
                 userId: member.user_id,
-                username: device.username,
+                username: displayName ?? device.username,
                 fingerprint,
                 status: 'conflict' as const
               }
@@ -1275,7 +1322,7 @@ function ChatRoom({
             const pin = localVault.peerPins?.[member.user_id]
             return {
               userId: member.user_id,
-              username: device.username,
+              username: displayName ?? device.username,
               fingerprint,
               status: pin === fingerprint ? 'verified' as const : pin ? 'changed' as const : 'unverified' as const
             }
@@ -1455,7 +1502,7 @@ function ChatRoom({
             {messages.map((message) => {
               const ownMessage = message.sender_id === session.user.id
               const sender = conversation.conversation_members.find((member) => member.user_id === message.sender_id)
-              const senderName = sender ? memberUsername(sender) : undefined
+              const senderName = sender ? memberDisplayName(sender) : undefined
               const imageAttachment = message.untrusted ? null : parseImageAttachment(message.text)
               return (
                 <div className={`message-row flex ${ownMessage ? 'justify-end' : 'justify-start'}`} key={message.id}>
@@ -1867,8 +1914,8 @@ function NicknameDialog({
         </label>
         <p className="text-xs leading-5 text-md3-onSurfaceVariant">
           Nicknames are saved only in this browser. {conversation.kind === 'group'
-            ? 'The group name and member handles remain visible beside it.'
-            : 'The original username remains visible beside it.'}
+            ? 'The group name and member preferred names remain visible beside it.'
+            : 'The contact preferred name remains visible beside it.'}
         </p>
         <div className="flex gap-3">
           {nickname && (
@@ -1890,15 +1937,17 @@ function NicknameDialog({
 }
 
 function NewConversationDialog({
+  initialHandle,
   acceptedHandles,
   onClose,
   onCreate
 }: {
+  initialHandle: string
   acceptedHandles: string[]
   onClose: () => void
   onCreate: (usernames: string[], title: string, firstMessage: string) => Promise<void>
 }) {
-  const [handles, setHandles] = useState('')
+  const [handles, setHandles] = useState(initialHandle)
   const [title, setTitle] = useState('')
   const [firstMessage, setFirstMessage] = useState('')
   const [error, setError] = useState('')

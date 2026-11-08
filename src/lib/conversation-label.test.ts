@@ -26,6 +26,17 @@ const groupConversation: Conversation = {
 }
 
 describe('conversationTitle', () => {
+  it('uses preferred display names when available', () => {
+    const namedConversation: Conversation = {
+      ...directConversation,
+      conversation_members: [
+        directConversation.conversation_members[0],
+        { user_id: 'peer', profiles: { username: 'jtlnyv67k3ej', display_name: 'Jamie' } }
+      ]
+    }
+    expect(conversationTitle(namedConversation, 'me')).toBe('Jamie')
+  })
+
   it('shows a direct conversation nickname with the original handle', () => {
     expect(conversationTitle(directConversation, 'me', 'Marcel')).toBe('Marcel (jtlnyv67k3ej)')
   })

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { authEmailForUsername, generateUsername, getPasswordRequirements, isValidUsername, registrationErrorMessage, validatePassword } from './auth'
+import { authEmailForUsername, generateUsername, getPasswordRequirements, isValidUsername, recipientHandleFromPath, registrationErrorMessage, validatePassword } from './auth'
 import {
   decryptMessage,
   decryptRootKeyTransfer,
@@ -50,6 +50,17 @@ describe('username authentication helpers', () => {
 
   it('rejects malformed usernames before building an auth alias', () => {
     expect(() => authEmailForUsername('not-a-handle')).toThrow('Enter a valid Sloppy username.')
+  })
+
+  it('extracts one valid handle from a deep link path', () => {
+    expect(recipientHandleFromPath('/ccq42t7rpzea')).toBe('ccq42t7rpzea')
+    expect(recipientHandleFromPath('/CCQ42T7RPZEA/')).toBe('ccq42t7rpzea')
+  })
+
+  it('rejects non-handle and multi-segment paths', () => {
+    expect(recipientHandleFromPath('/')).toBeNull()
+    expect(recipientHandleFromPath('/settings')).toBeNull()
+    expect(recipientHandleFromPath('/ccq42t7rpzea/extra')).toBeNull()
   })
 
   it('requires a long password with mixed case, a number, and a special character', () => {

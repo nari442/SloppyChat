@@ -1,9 +1,9 @@
-import { memberUsername, type Conversation } from './chat-service'
+import { memberDisplayName, type Conversation } from './chat-service'
 
 export function conversationMemberNames(conversation: Conversation, currentUserId: string): string[] {
   return conversation.conversation_members
     .filter((member) => member.user_id !== currentUserId)
-    .map((member) => memberUsername(member) ?? 'Sloppy user')
+    .map((member) => memberDisplayName(member) ?? 'Sloppy user')
 }
 
 export function conversationTitle(conversation: Conversation, currentUserId: string, nickname?: string): string {

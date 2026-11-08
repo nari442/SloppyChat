@@ -15,6 +15,18 @@ export function isValidUsername(username: string): boolean {
   return usernamePattern.test(normalizeUsername(username))
 }
 
+export function recipientHandleFromPath(pathname: string): string | null {
+  const segments = pathname.split(/[?#]/, 1)[0].split('/').filter(Boolean)
+  if (segments.length !== 1) return null
+  let candidate: string
+  try {
+    candidate = normalizeUsername(decodeURIComponent(segments[0]))
+  } catch {
+    return null
+  }
+  return isValidUsername(candidate) ? candidate : null
+}
+
 export function authEmailForUsername(username: string): string {
   const normalized = normalizeUsername(username)
   if (!isValidUsername(normalized)) {

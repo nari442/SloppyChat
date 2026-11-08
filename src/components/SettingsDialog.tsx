@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Bell, Check, KeyRound, LoaderCircle, Monitor, Moon, Shield, Sun, X } from 'lucide-react'
+import { Bell, Check, KeyRound, LoaderCircle, Monitor, Moon, Shield, Sun, UserRound, X } from 'lucide-react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { authEmailForUsername, validatePassword } from '../lib/auth'
 import { loadBlockedUsers, unblockUser, type BlockedUser } from '../lib/conversation-service'
@@ -15,7 +15,9 @@ export function SettingsDialog({
   onOpenDevices,
   onOpenRequests,
   onThemeChange,
+  onDisplayNameChange,
   theme,
+  displayName,
   username
 }: {
   client: SupabaseClient
@@ -25,12 +27,15 @@ export function SettingsDialog({
   onOpenDevices: () => void
   onOpenRequests: () => void
   onThemeChange: (theme: Theme) => void
+  onDisplayNameChange: (displayName: string) => void
   theme: Theme
+  displayName: string
   username: string
 }) {
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
+  const [preferredName, setPreferredName] = useState(displayName)
   const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([])
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
@@ -45,6 +50,31 @@ export function SettingsDialog({
       })
     return () => { active = false }
   }, [client])
+
+  async function savePreferredName(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const nextName = preferredName.trim()
+    if (!nextName || nextName.length > 40) {
+      setError('Use a preferred name between 1 and 40 characters.')
+      return
+    }
+    setError('')
+    setNotice('')
+    setBusy('display-name')
+    try {
+      const { error: updateError } = await client.rpc('set_my_display_name', {
+        requested_display_name: nextName
+      })
+      if (updateError) throw new Error(updateError.message)
+      setPreferredName(nextName)
+      onDisplayNameChange(nextName)
+      setNotice('Preferred name updated.')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not update your preferred name.')
+    } finally {
+      setBusy('')
+    }
+  }
 
   async function changePassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -113,6 +143,15 @@ export function SettingsDialog({
             <button aria-pressed={theme === 'light'} className={`flex items-center justify-center gap-2 rounded-2xl border px-2 py-3 text-sm font-semibold ${theme === 'light' ? 'border-md3-primary bg-md3-primaryContainer text-md3-onPrimaryContainer' : 'border-md3-outlineVariant text-md3-onSurfaceVariant'}`} onClick={() => onThemeChange('light')} type="button"><Sun size={16} /> Light</button>
             <button aria-pressed={theme === 'dark'} className={`flex items-center justify-center gap-2 rounded-2xl border px-2 py-3 text-sm font-semibold ${theme === 'dark' ? 'border-md3-primary bg-md3-primaryContainer text-md3-onPrimaryContainer' : 'border-md3-outlineVariant text-md3-onSurfaceVariant'}`} onClick={() => onThemeChange('dark')} type="button"><Moon size={16} /> Dark</button>
           </div>
+        </section>
+
+        <section className="mt-5 border-t border-md3-outlineVariant/60 pt-5">
+          <h3 className="flex items-center gap-2 text-sm font-semibold"><UserRound size={16} /> Preferred name</h3>
+          <form className="mt-3 flex flex-col gap-2 sm:flex-row" onSubmit={(event) => void savePreferredName(event)}>
+            <input autoComplete="name" className="min-w-0 flex-1 rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 text-sm" maxLength={40} onChange={(event) => setPreferredName(event.target.value)} value={preferredName} />
+            <button className="flex items-center justify-center gap-2 rounded-full bg-md3-primary px-4 py-3 text-sm font-semibold text-md3-onPrimary disabled:opacity-60" disabled={busy === 'display-name'} type="submit">{busy === 'display-name' ? <LoaderCircle className="animate-spin" size={16} /> : <Check size={16} />} Save name</button>
+          </form>
+          <p className="mt-2 text-xs leading-5 text-md3-onSurfaceVariant">This is the name contacts see. Your generated handle remains your login and contact link.</p>
         </section>
 
         <section className="mt-5 border-t border-md3-outlineVariant/60 pt-5">

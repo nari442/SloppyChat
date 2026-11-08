@@ -13,7 +13,7 @@ import { loadConversationDevices } from './device-service'
 
 export interface ConversationMember {
   user_id: string
-  profiles: { username: string } | { username: string }[] | null
+  profiles: { username: string; display_name?: string | null } | { username: string; display_name?: string | null }[] | null
 }
 
 export interface Conversation {
@@ -36,6 +36,12 @@ export function memberUsername(member: ConversationMember): string | undefined {
   return Array.isArray(profile) ? profile[0]?.username : profile?.username
 }
 
+export function memberDisplayName(member: ConversationMember): string | undefined {
+  const profile = member.profiles
+  const displayName = Array.isArray(profile) ? profile[0]?.display_name : profile?.display_name
+  return displayName?.trim() || memberUsername(member)
+}
+
 export interface ChatMessage {
   id: string
   sender_id: string
@@ -55,7 +61,7 @@ type StoredMessage = Omit<ChatMessage, 'text' | 'untrusted'>
 export async function loadConversations(client: SupabaseClient): Promise<Conversation[]> {
   const { data, error } = await client
     .from('conversations')
-    .select('id, kind, title, created_at, conversation_members(user_id, profiles(username))')
+    .select('id, kind, title, created_at, conversation_members(user_id, profiles(username, display_name))')
     .order('created_at', { ascending: false })
   if (error) {
     throw new Error(`Could not load conversations: ${error.message}`)

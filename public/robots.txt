@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://sloppychat.vercel.app/sitemap.xml
