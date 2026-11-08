@@ -1,0 +1,2128 @@
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import {
+  ArrowLeft,
+  Archive,
+  Ban,
+  Check,
+  ChevronDown,
+  Copy,
+  Eraser,
+  ImagePlus,
+  LoaderCircle,
+  LockKeyhole,
+  LogOut,
+  MessageCircle,
+  MoreHorizontal,
+  Plus,
+  Pencil,
+  Search,
+  Send,
+  Settings,
+  ShieldAlert,
+  ShieldCheck,
+  Smartphone,
+  Trash2,
+  Users,
+  X
+} from 'lucide-react'
+import type { Session, SupabaseClient } from '@supabase/supabase-js'
+import {
+  createConversation,
+  decryptRealtimeMessage,
+  loadConversations,
+  loadMessages,
+  memberUsername,
+  sendMessage,
+  type ChatMessage,
+  type Conversation,
+  type StoredMessage
+} from './lib/chat-service'
+import {
+  decryptIncomingMessageRequest,
+  loadIncomingMessageRequests,
+  respondToMessageRequest,
+  sendMessageRequest,
+  type IncomingMessageRequest
+} from './lib/chat-service'
+import { conversationMemberNames } from './lib/conversation-label'
+import { ConversationLabel } from './components/ConversationLabel'
+import { Handle } from './components/Handle'
+import { SettingsDialog } from './components/SettingsDialog'
+import { authEmailForUsername, generateUsername, getPasswordRequirements, isValidUsername, registrationErrorMessage, validatePassword } from './lib/auth'
+import { identityFingerprint } from './lib/crypto'
+import {
+  blockUser,
+  clearConversation,
+  deleteDirectConversationForEveryone,
+  hideConversation,
+  loadConversationPreferences,
+  type ConversationPreference
+} from './lib/conversation-service'
+import { approveDevice, activateOrRequestDevice, loadConversationDevices, revokeDevice, type DeviceState, type StoredDevice } from './lib/device-service'
+import { saveDeviceVault, type DeviceVault } from './lib/device-vault'
+import {
+  decryptImageAttachment,
+  parseImageAttachment,
+  removeUploadedImage,
+  uploadEncryptedImage,
+  validateImageFile,
+  type ImageAttachment
+} from './lib/image-attachment'
+import { createSupabaseClient } from './lib/supabase'
+import sloppyChatLogo from './assets/sloppychat.svg'
+
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+const supabasePublishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || import.meta.env.VITE_SUPABASE_ANON_KEY
+
+type AuthMode = 'login' | 'register'
+type ThemePreference = 'system' | 'light' | 'dark'
+
+function messageFromError(reason: unknown): string {
+  return reason instanceof Error ? reason.message : 'Something went wrong. Please try again.'
+}
+
+function loadConversationNicknames(userId: string): { values: Record<string, string>; error: string } {
+  try {
+    const saved = window.localStorage.getItem(`sloppy-conversation-nicknames:${userId}`)
+    if (!saved) {
+      return { values: {}, error: '' }
+    }
+    const parsed: unknown = JSON.parse(saved)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Stored conversation nicknames have an invalid format.')
+    }
+    const validEntries = Object.entries(parsed).filter((entry): entry is [string, string] => (
+      typeof entry[1] === 'string'
+    ))
+    return { values: Object.fromEntries(validEntries), error: '' }
+  } catch (reason) {
+    return { values: {}, error: `Could not load local conversation nicknames: ${messageFromError(reason)}` }
+  }
+}
+
+function workspaceErrorMessage(reason: unknown): string {
+  const message = messageFromError(reason)
+  if (/conversation_preferences.*(schema cache|does not exist)|(?:schema cache|does not exist).*conversation_preferences/i.test(message)) {
+    return 'The Sloppy settings migration is missing. In the Supabase SQL Editor, run supabase/migrations/202611080003_settings_conversation_media.sql, then run NOTIFY pgrst, \'reload schema\'; and refresh this page. This migration preserves existing accounts and messages.'
+  }
+  if (/public\.profiles.*schema cache|schema cache.*public\.profiles|relation.*profiles.*does not exist/i.test(message)) {
+    return 'The public.profiles table is not available to Sloppy. Open supabase/migrations/202611080001_initial_schema.sql in your project, copy its entire contents, and paste that SQL into the Supabase SQL Editor before clicking Run. Do not enter the file path as SQL. If the migration was already applied, run NOTIFY pgrst, \'reload schema\'; instead. Then sign out and sign in again.'
+  }
+  return message
+}
+
+const supabaseConfiguration = (() => {
+  if (!supabaseUrl || !supabasePublishableKey) {
+    return { client: null, error: 'Supabase URL and public publishable key are missing from the environment.' }
+  }
+  try {
+    return { client: createSupabaseClient(supabaseUrl, supabasePublishableKey), error: '' }
+  } catch (reason) {
+    return { client: null, error: messageFromError(reason) }
+  }
+})()
+
+function App() {
+  const [theme, setTheme] = useState<ThemePreference>(() => {
+    const saved = window.localStorage.getItem('sloppy-theme-preference')
+    return saved === 'light' || saved === 'dark' ? saved : 'system'
+  })
+  const configuration = supabaseConfiguration
+  const client = configuration.client
+  const [session, setSession] = useState<Session | null>(null)
+  const [sessionLoading, setSessionLoading] = useState(true)
+  const [sessionError, setSessionError] = useState('')
+
+  useEffect(() => {
+    const colorScheme = window.matchMedia('(prefers-color-scheme: dark)')
+    const applyTheme = () => {
+      document.documentElement.dataset.theme = theme === 'system'
+        ? colorScheme.matches ? 'dark' : 'light'
+        : theme
+    }
+    applyTheme()
+    if (theme === 'system') {
+      window.localStorage.removeItem('sloppy-theme-preference')
+      colorScheme.addEventListener('change', applyTheme)
+      return () => colorScheme.removeEventListener('change', applyTheme)
+    }
+    window.localStorage.setItem('sloppy-theme-preference', theme)
+  }, [theme])
+
+  useEffect(() => {
+    if (!client) {
+      return
+    }
+    let active = true
+    client.auth.getSession().then(({ data, error }) => {
+      if (!active) {
+        return
+      }
+      if (error) {
+        setSessionError(`Could not restore your session: ${error.message}`)
+        setSessionLoading(false)
+        return
+      }
+      setSession(data.session)
+      setSessionLoading(false)
+    }).catch((reason: unknown) => {
+      if (active) {
+        setSessionError(`Could not restore your session: ${messageFromError(reason)}`)
+        setSessionLoading(false)
+      }
+    })
+    const { data: authListener } = client.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession)
+      setSessionLoading(false)
+    })
+    return () => {
+      active = false
+      authListener.subscription.unsubscribe()
+    }
+  }, [client])
+
+  let screen: ReactNode
+  if (!client) {
+    screen = <SetupNotice error={configuration.error} />
+  } else if (sessionLoading) {
+    screen = <LoadingScreen label="Connecting to Sloppy" />
+  } else if (sessionError) {
+    screen = <ProblemScreen error={sessionError} onSignOut={() => setSessionError('')} />
+  } else if (!session) {
+    screen = <AuthScreen client={client} />
+  } else {
+    screen = <Workspace client={client} session={session} theme={theme} onThemeChange={setTheme} />
+  }
+
+  return <>{screen}</>
+}
+
+function SetupNotice({ error }: { error: string }) {
+  return (
+    <main className="grid min-h-screen place-items-center bg-md3-background px-5 py-10">
+      <section className="w-full max-w-xl rounded-3xl bg-md3-surface p-8 shadow-lift sm:p-10">
+        <BrandMark />
+        <h1 className="mt-8 text-3xl font-semibold tracking-tight text-md3-onBackground">Connect your Supabase project</h1>
+        <p className="mt-3 leading-7 text-md3-onSurfaceVariant">
+          Add the project URL and public publishable key to a local <code className="rounded-lg bg-md3-surfaceContainer px-2 py-1 text-sm">.env</code> file.
+          Apply the SQL migration and disable email confirmations for password-only registration.
+        </p>
+        <pre className="mt-6 overflow-x-auto rounded-2xl bg-[#17252b] p-5 text-sm leading-7 text-[#b2f1d3]"><code>VITE_SUPABASE_URL=https://your-project.supabase.co{'\n'}VITE_SUPABASE_PUBLISHABLE_KEY=your-public-publishable-key</code></pre>
+        <p className="mt-5 text-sm leading-6 text-md3-onSurfaceVariant">
+          Never use a Supabase service-role key in browser configuration. See the setup guide for auth and database steps.
+        </p>
+        <p className="mt-3 text-xs text-md3-error" role="alert">{error}</p>
+      </section>
+    </main>
+  )
+}
+
+function BrandMark() {
+  return (
+    <div className="brand-mark flex items-center gap-3">
+      <img className="h-12 w-12" src={sloppyChatLogo} alt="" />
+      <span className="text-xl font-semibold tracking-tight text-md3-onBackground">Sloppy</span>
+    </div>
+  )
+}
+
+function LoadingScreen({ label }: { label: string }) {
+  return (
+    <main className="grid min-h-screen place-items-center bg-md3-background text-md3-primary">
+      <div className="flex items-center gap-3 rounded-full bg-md3-surface px-6 py-4 shadow-lift">
+        <LoaderCircle className="animate-spin" size={20} />
+        <span className="text-sm font-medium">{label}</span>
+      </div>
+    </main>
+  )
+}
+
+function AuthScreen({ client }: { client: SupabaseClient }) {
+  const [mode, setMode] = useState<AuthMode>('login')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [generatedUsername, setGeneratedUsername] = useState('')
+  const [notice, setNotice] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError('')
+    setNotice('')
+    setBusy(true)
+    try {
+      if (mode === 'register') {
+        if (password !== confirmPassword) {
+          throw new Error('Your passwords do not match.')
+        }
+        const passwordError = validatePassword(password)
+        if (passwordError) {
+          throw new Error(passwordError)
+        }
+        const newUsername = generateUsername()
+        setGeneratedUsername(newUsername)
+        const { data, error: signUpError } = await client.auth.signUp({
+          email: authEmailForUsername(newUsername),
+          password,
+          options: { data: { username: newUsername } }
+        })
+        if (signUpError) {
+          throw new Error(registrationErrorMessage(signUpError.message))
+        }
+        setUsername('')
+        setPassword('')
+        setConfirmPassword('')
+        if (!data.session) {
+          setNotice('Account created. Disable email confirmations in Supabase Auth to continue without an email address.')
+        } else {
+          setNotice('Your private login handle is ready. Save it before leaving this page.')
+        }
+      } else {
+        if (!isValidUsername(username)) {
+          throw new Error('Enter your 12-character Sloppy username.')
+        }
+        const { error: signInError } = await client.auth.signInWithPassword({
+          email: authEmailForUsername(username),
+          password
+        })
+        if (signInError) {
+          throw new Error(signInError.message)
+        }
+      }
+    } catch (reason) {
+      setError(messageFromError(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const isRegister = mode === 'register'
+  return (
+    <main className="auth-background relative grid min-h-screen place-items-center overflow-hidden bg-md3-background px-4 py-10">
+      <div className="ambient-orb pointer-events-none absolute -left-24 top-12 h-72 w-72 rounded-full bg-md3-primaryContainer/60 blur-3xl" />
+      <div className="ambient-orb ambient-orb-delayed pointer-events-none absolute -bottom-28 -right-20 h-96 w-96 rounded-full bg-md3-tertiaryContainer/50 blur-3xl" />
+      <section className="auth-panel relative w-full max-w-md rounded-[2rem] p-7 sm:p-10" key={mode}>
+        <BrandMark />
+        <div className="mt-10">
+          <h1 className="text-[2rem] font-semibold tracking-tight text-md3-onBackground">
+            {isRegister ? 'Create your space' : 'Welcome back'}
+          </h1>
+          <p className="mt-2 leading-6 text-md3-onSurfaceVariant">
+            {isRegister
+              ? 'Your account starts with a generated handle. Only your password is needed.'
+              : 'Use your Sloppy handle and password to unlock your conversations.'}
+          </p>
+        </div>
+        <form className="mt-7 space-y-4" onSubmit={submit}>
+          {isRegister ? (
+            <>
+              <label className="block text-sm font-medium text-md3-onSurface">
+                Password
+                <input
+                  autoComplete="new-password"
+                  className="auth-input mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3.5 outline-none transition focus:border-md3-primary focus:ring-4 focus:ring-md3-primary/10"
+                  maxLength={72}
+                  minLength={12}
+                  onChange={(event) => setPassword(event.target.value)}
+                  required
+                  type="password"
+                  value={password}
+                />
+              </label>
+              <PasswordRequirements password={password} />
+              <label className="block text-sm font-medium text-md3-onSurface">
+                Confirm password
+                <input
+                  autoComplete="new-password"
+                  className="auth-input mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3.5 outline-none transition focus:border-md3-primary focus:ring-4 focus:ring-md3-primary/10"
+                  maxLength={72}
+                  onChange={(event) => setConfirmPassword(event.target.value)}
+                  required
+                  type="password"
+                  value={confirmPassword}
+                />
+              </label>
+            </>
+          ) : (
+            <>
+              <label className="block text-sm font-medium text-md3-onSurface">
+                Sloppy username
+                <input
+                  autoCapitalize="none"
+                  autoComplete="username"
+                  className="auth-input mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3.5 outline-none transition focus:border-md3-primary focus:ring-4 focus:ring-md3-primary/10"
+                  maxLength={12}
+                  onChange={(event) => setUsername(event.target.value)}
+                  pattern="[a-zA-Z2-7]{12}"
+                  required
+                  value={username}
+                />
+              </label>
+              <label className="block text-sm font-medium text-md3-onSurface">
+                Password
+                <input
+                  autoComplete="current-password"
+                  className="auth-input mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3.5 outline-none transition focus:border-md3-primary focus:ring-4 focus:ring-md3-primary/10"
+                  maxLength={72}
+                  onChange={(event) => setPassword(event.target.value)}
+                  required
+                  type="password"
+                  value={password}
+                />
+              </label>
+            </>
+          )}
+          {error && <p role="alert" className="rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer">{error}</p>}
+          {notice && <p role="status" className="rounded-2xl bg-md3-primaryContainer px-4 py-3 text-sm leading-6 text-md3-onPrimaryContainer">{notice}</p>}
+          {generatedUsername && (
+            <GeneratedHandle username={generatedUsername} onDismiss={() => setGeneratedUsername('')} />
+          )}
+          <button
+            className="auth-submit flex w-full items-center justify-center gap-2 rounded-full bg-md3-primary px-5 py-3.5 font-semibold text-md3-onPrimary transition hover:brightness-95 disabled:cursor-wait disabled:opacity-70"
+            disabled={busy}
+            type="submit"
+          >
+            {busy && <LoaderCircle className="animate-spin" size={18} />}
+            {isRegister ? 'Create account' : 'Sign in'}
+          </button>
+        </form>
+        <div className="mt-7 flex items-center justify-center gap-1 border-t border-md3-outlineVariant/50 pt-5 text-sm text-md3-onSurfaceVariant">
+          <span>{isRegister ? 'Already have a handle?' : 'New to Sloppy?'}</span>
+          <button
+            className="rounded-full px-2 py-1 font-semibold text-md3-primary hover:bg-md3-primaryContainer/60"
+            onClick={() => {
+              setMode(isRegister ? 'login' : 'register')
+              setError('')
+              setNotice('')
+              setGeneratedUsername('')
+            }}
+            type="button"
+          >
+            {isRegister ? 'Sign in' : 'Create account'}
+          </button>
+        </div>
+      </section>
+    </main>
+  )
+}
+
+function PasswordRequirements({ password }: { password: string }) {
+  const requirements = getPasswordRequirements(password)
+  const rules = [
+    { label: '12 characters minimum', met: requirements.minimumLength },
+    { label: 'One uppercase letter', met: requirements.uppercase },
+    { label: 'One lowercase letter', met: requirements.lowercase },
+    { label: 'One number', met: requirements.number },
+    { label: 'One special character', met: requirements.specialCharacter },
+  ]
+
+  return (
+    <ul aria-label="Password requirements" className="grid grid-cols-2 gap-x-3 gap-y-1.5 rounded-2xl bg-md3-surfaceContainerLow p-3 text-xs" aria-live="polite">
+      {rules.map((rule) => (
+        <li className={`flex items-center gap-1.5 ${rule.met ? 'text-md3-primary' : 'text-md3-onSurfaceVariant'}`} key={rule.label}>
+          <Check aria-hidden="true" size={13} className={rule.met ? '' : 'opacity-30'} />
+          {rule.label}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function GeneratedHandle({ username, onDismiss }: { username: string; onDismiss: () => void }) {
+  const [copied, setCopied] = useState(false)
+  const [copyError, setCopyError] = useState('')
+  async function copyHandle() {
+    setCopyError('')
+    try {
+      await navigator.clipboard.writeText(username)
+      setCopied(true)
+    } catch (reason) {
+      setCopyError(messageFromError(reason))
+    }
+  }
+  return (
+    <div className="rounded-2xl border border-md3-outlineVariant bg-md3-surfaceContainerLow p-4">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs font-semibold uppercase tracking-wider text-md3-onSurfaceVariant">Your shareable handle</span>
+        <button aria-label="Dismiss handle" className="rounded-full p-1 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onDismiss} type="button">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-3">
+        <code className="text-lg font-semibold tracking-[0.12em] text-md3-onBackground">{username}</code>
+        <button className="flex items-center gap-1.5 rounded-full bg-md3-primaryContainer px-3 py-2 text-sm font-semibold text-md3-onPrimaryContainer" onClick={copyHandle} type="button">
+          {copied ? <Check size={16} /> : <Copy size={16} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-md3-onSurfaceVariant">Save this handle. Password-only accounts cannot recover a lost handle by email.</p>
+      {copyError && <p className="mt-2 text-xs text-md3-error" role="alert">{copyError}</p>}
+    </div>
+  )
+}
+
+function Workspace({
+  client,
+  session,
+  theme,
+  onThemeChange
+}: {
+  client: SupabaseClient
+  session: Session
+  theme: ThemePreference
+  onThemeChange: (theme: ThemePreference) => void
+}) {
+  const userId = session.user.id
+  const [username, setUsername] = useState('')
+  const [deviceState, setDeviceState] = useState<DeviceState | null>(null)
+  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [conversationPreferences, setConversationPreferences] = useState<Record<string, ConversationPreference>>({})
+  const [selectedId, setSelectedId] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [nicknameStorage, setNicknameStorage] = useState(() => loadConversationNicknames(userId))
+  const [error, setError] = useState(nicknameStorage.error)
+  const [newChatOpen, setNewChatOpen] = useState(false)
+  const [messageRequestsOpen, setMessageRequestsOpen] = useState(false)
+  const [messageRequests, setMessageRequests] = useState<IncomingMessageRequest[]>([])
+  const [devicesOpen, setDevicesOpen] = useState(false)
+  const [mobileChatOpen, setMobileChatOpen] = useState(false)
+  const [busyDeviceId, setBusyDeviceId] = useState('')
+  const [handleCopied, setHandleCopied] = useState(false)
+  const [nicknameConversationId, setNicknameConversationId] = useState('')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [actionConversationId, setActionConversationId] = useState('')
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => (
+    window.localStorage.getItem(`sloppy-notifications:${userId}`) === 'true'
+  ))
+
+  useEffect(() => {
+    let active = true
+    async function prepareWorkspace() {
+      setLoading(true)
+      try {
+        const { data, error: profileError } = await client
+          .from('profiles')
+          .select('username')
+          .eq('id', userId)
+          .single()
+        if (profileError) {
+          throw new Error(profileError.message)
+        }
+        const handle = (data as { username: string }).username
+        const nextDeviceState = await activateOrRequestDevice(client, userId, handle)
+        if (!active) {
+          return
+        }
+        setUsername(handle)
+        setDeviceState(nextDeviceState)
+        if (nextDeviceState.status === 'active') {
+          const [nextConversations, preferences] = await Promise.all([
+            loadConversations(client),
+            loadConversationPreferences(client)
+          ])
+          setConversations(nextConversations)
+          setConversationPreferences(Object.fromEntries(preferences.map((preference) => [preference.conversation_id, preference])))
+        }
+      } catch (reason) {
+        if (active) {
+          setError(workspaceErrorMessage(reason))
+        }
+      } finally {
+        if (active) {
+          setLoading(false)
+        }
+      }
+    }
+    void prepareWorkspace()
+    return () => {
+      active = false
+    }
+  }, [client, userId])
+
+  useEffect(() => {
+    if (deviceState?.status !== 'active') {
+      return
+    }
+    let active = true
+    const channel = client
+      .channel(`sloppy-members:${userId}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'conversation_members',
+        filter: `user_id=eq.${userId}`
+      }, () => {
+        void loadConversations(client)
+          .then((nextConversations) => {
+            if (active) {
+              setConversations(nextConversations)
+            }
+          })
+          .catch((reason: unknown) => {
+            if (active) {
+              setError(messageFromError(reason))
+            }
+          })
+      })
+      .subscribe((status) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setError('Conversation updates could not connect through Supabase Realtime.')
+        }
+      })
+    return () => {
+      active = false
+      void client.removeChannel(channel)
+    }
+  }, [client, deviceState?.status, userId])
+
+  useEffect(() => {
+    if (deviceState?.status !== 'active') {
+      return
+    }
+    let active = true
+    const refreshRequests = () => loadIncomingMessageRequests(client)
+      .then((requests) => {
+        if (active) {
+          setMessageRequests(requests)
+        }
+      })
+      .catch((reason: unknown) => {
+        if (active) {
+          setError(messageFromError(reason))
+        }
+      })
+    void refreshRequests()
+    const channel = client
+      .channel(`sloppy-requests:${userId}`)
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'message_requests',
+        filter: `recipient_id=eq.${userId}`
+      }, () => {
+        if (notificationsEnabled && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+          new Notification('New message request', { body: 'Open Sloppy to review it.' })
+        }
+        void refreshRequests()
+      })
+      .subscribe((status) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setError('Message request updates could not connect. Refresh the inbox to check again.')
+        }
+      })
+    return () => {
+      active = false
+      void client.removeChannel(channel)
+    }
+  }, [client, deviceState?.status, notificationsEnabled, userId])
+
+  async function signOut() {
+    const { error: signOutError } = await client.auth.signOut()
+    if (signOutError) {
+      setError(`Could not sign out: ${signOutError.message}`)
+    }
+  }
+
+  async function copyHandle() {
+    try {
+      await navigator.clipboard.writeText(username)
+      setHandleCopied(true)
+    } catch (reason) {
+      setError(messageFromError(reason))
+    }
+  }
+
+  async function refreshConversations(nextId?: string) {
+    const [nextConversations, preferences] = await Promise.all([
+      loadConversations(client),
+      loadConversationPreferences(client)
+    ])
+    setConversations(nextConversations)
+    setConversationPreferences(Object.fromEntries(preferences.map((preference) => [preference.conversation_id, preference])))
+    if (nextId) {
+      setSelectedId(nextId)
+      setMobileChatOpen(true)
+    }
+  }
+
+  async function refreshDeviceRequests() {
+    const { data, error: devicesError } = await client.rpc('get_my_devices')
+    if (devicesError) {
+      throw new Error(`Could not refresh device requests: ${devicesError.message}`)
+    }
+    const devices = (data ?? []) as StoredDevice[]
+    setDeviceState((current) => current?.status === 'active'
+      ? {
+          ...current,
+          pendingDevices: devices.filter((device) => !device.approved_at),
+          trustedDevices: devices.filter((device) => device.approved_at && !device.revoked_at)
+        }
+      : current)
+  }
+
+  async function approvePendingDevice(target: StoredDevice) {
+    if (!deviceState || deviceState.status !== 'active') {
+      return
+    }
+    setBusyDeviceId(target.device_id)
+    setError('')
+    try {
+      await approveDevice(client, deviceState.vault, target)
+      await refreshDeviceRequests()
+    } catch (reason) {
+      setError(messageFromError(reason))
+      throw reason
+    } finally {
+      setBusyDeviceId('')
+    }
+  }
+
+  async function revokeTrustedDevice(target: StoredDevice) {
+    if (!deviceState || deviceState.status !== 'active') {
+      return
+    }
+    if (!window.confirm(`Revoke ${target.label}? It will not receive future messages.`)) {
+      return
+    }
+    setBusyDeviceId(target.device_id)
+    setError('')
+    try {
+      await revokeDevice(client, deviceState.vault, target.device_id)
+      await refreshDeviceRequests()
+    } catch (reason) {
+      setError(messageFromError(reason))
+      throw reason
+    } finally {
+      setBusyDeviceId('')
+    }
+  }
+
+  async function checkEnrollment() {
+    setLoading(true)
+    setError('')
+    try {
+      const state = await activateOrRequestDevice(client, userId, username)
+      setDeviceState(state)
+      if (state.status === 'active') {
+        const [nextConversations, preferences] = await Promise.all([
+          loadConversations(client),
+          loadConversationPreferences(client)
+        ])
+        setConversations(nextConversations)
+        setConversationPreferences(Object.fromEntries(preferences.map((preference) => [preference.conversation_id, preference])))
+      }
+    } catch (reason) {
+      setError(messageFromError(reason))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function startConversation(handles: string[], title: string, firstMessage: string) {
+    if (handles.length === 1) {
+      const handle = handles[0]
+      const existing = conversations.find((conversation) => (
+        conversation.kind === 'direct'
+        && conversation.conversation_members.some((member) => memberUsername(member) === handle)
+      ))
+      if (existing) {
+        if (!deviceState || deviceState.status !== 'active') {
+          throw new Error('This browser is not ready to send messages.')
+        }
+        await sendMessage(
+          client,
+          existing.id,
+          userId,
+          existing.conversation_members.map((member) => member.user_id),
+          deviceState.vault,
+          firstMessage
+        )
+        await refreshConversations(existing.id)
+        setNewChatOpen(false)
+        return
+      }
+      if (!deviceState || deviceState.status !== 'active') {
+        throw new Error('This browser is not ready to send message requests.')
+      }
+      await sendMessageRequest(client, handle, userId, username, deviceState.vault, firstMessage)
+      setMessageRequests(await loadIncomingMessageRequests(client))
+      setNewChatOpen(false)
+      return
+    }
+    const id = await createConversation(client, handles, title)
+    await refreshConversations(id)
+    setNewChatOpen(false)
+  }
+
+  async function handleMessageRequest(request: IncomingMessageRequest, action: 'accept' | 'deny' | 'block') {
+    await respondToMessageRequest(client, request.request_id, action)
+    setMessageRequests(await loadIncomingMessageRequests(client))
+    if (action === 'accept') {
+      await refreshConversations(request.request_id)
+    }
+  }
+
+  if (loading) {
+    return <LoadingScreen label="Preparing your encrypted workspace" />
+  }
+
+  if (error && !deviceState) {
+    return <ProblemScreen error={error} onSignOut={signOut} />
+  }
+
+  if (deviceState?.status === 'pending') {
+    return (
+      <main className="grid min-h-screen place-items-center bg-md3-background px-5 py-10">
+        <section className="w-full max-w-lg rounded-3xl bg-md3-surface p-8 shadow-lift sm:p-10">
+          <BrandMark />
+          <div className="mt-8 grid h-14 w-14 place-items-center rounded-2xl bg-md3-tertiaryContainer text-md3-onTertiaryContainer">
+            <Smartphone size={25} />
+          </div>
+          <h1 className="mt-5 text-2xl font-semibold text-md3-onBackground">Approve this browser</h1>
+          <p className="mt-3 leading-7 text-md3-onSurfaceVariant">
+            Sign in on a trusted device for <strong className="font-semibold text-md3-onBackground">{username}</strong>. Compare this device code with the pending request before approving it.
+          </p>
+          <div className="mt-4 rounded-2xl bg-md3-surfaceContainerLow p-4">
+            <p className="text-xs font-semibold uppercase tracking-wider text-md3-onSurfaceVariant">New browser code</p>
+            <code className="mt-2 block break-all text-sm font-semibold tracking-wide text-md3-onBackground">{deviceState.vault.deviceId}</code>
+            <p className="mt-2 text-xs leading-5 text-md3-onSurfaceVariant">Approval grants access to future messages only.</p>
+          </div>
+          {error && <p role="alert" className="mt-4 rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer">{error}</p>}
+          <button className="mt-6 flex w-full items-center justify-center gap-2 rounded-full bg-md3-primary px-5 py-3.5 font-semibold text-md3-onPrimary" onClick={checkEnrollment} type="button">
+            Check approval
+          </button>
+          <button className="mt-3 w-full rounded-full px-5 py-3 text-sm font-semibold text-md3-onSurfaceVariant hover:bg-md3-surfaceContainerLow" onClick={signOut} type="button">
+            Sign out
+          </button>
+        </section>
+      </main>
+    )
+  }
+
+  if (!deviceState || deviceState.status !== 'active') {
+    return <ProblemScreen error={error || 'No trusted device is available.'} onSignOut={signOut} />
+  }
+
+  const selectedConversation = conversations.find((conversation) => conversation.id === selectedId)
+  const editingNicknameConversation = conversations.find((conversation) => conversation.id === nicknameConversationId)
+  const actionConversation = conversations.find((conversation) => conversation.id === actionConversationId)
+  const savedNicknames = nicknameStorage.values
+  const pendingCount = deviceState.pendingDevices.length
+  const visibleConversations = conversations.filter((conversation) => !conversationPreferences[conversation.id]?.hidden_at)
+
+  function saveConversationNickname(conversationId: string, nickname: string) {
+    const next = { ...nicknameStorage.values }
+    if (nickname) {
+      next[conversationId] = nickname
+    } else {
+      delete next[conversationId]
+    }
+    try {
+      window.localStorage.setItem(`sloppy-conversation-nicknames:${userId}`, JSON.stringify(next))
+      setNicknameStorage({ values: next, error: '' })
+      setError('')
+    } catch (reason) {
+      setError(`Could not save local conversation nicknames: ${messageFromError(reason)}`)
+    }
+    setNicknameConversationId('')
+  }
+
+  async function changeNotificationPreference(enabled: boolean) {
+    setError('')
+    if (enabled) {
+      if (!('Notification' in window)) {
+        setError('Browser notifications are not available in this browser.')
+        return
+      }
+      let permission = Notification.permission
+      if (permission === 'default') permission = await Notification.requestPermission()
+      if (permission !== 'granted') {
+        setError('Allow browser notifications in your browser settings to enable them here.')
+        return
+      }
+    }
+    try {
+      window.localStorage.setItem(`sloppy-notifications:${userId}`, String(enabled))
+      setNotificationsEnabled(enabled)
+    } catch (reason) {
+      setError(`Could not save notification settings: ${messageFromError(reason)}`)
+    }
+  }
+
+  async function hideConversationFromMe(conversation: Conversation) {
+    await hideConversation(client, conversation.id)
+    setConversationPreferences((current) => ({
+      ...current,
+      [conversation.id]: {
+        conversation_id: conversation.id,
+        hidden_at: new Date().toISOString(),
+        cleared_at: current[conversation.id]?.cleared_at ?? null
+      }
+    }))
+    setActionConversationId('')
+    if (selectedId === conversation.id) {
+      setSelectedId('')
+      setMobileChatOpen(false)
+    }
+  }
+
+  async function clearConversationForMe(conversation: Conversation) {
+    const clearedAt = await clearConversation(client, conversation.id)
+    setConversationPreferences((current) => ({
+      ...current,
+      [conversation.id]: {
+        conversation_id: conversation.id,
+        hidden_at: current[conversation.id]?.hidden_at ?? null,
+        cleared_at: clearedAt
+      }
+    }))
+    setActionConversationId('')
+  }
+
+  async function deleteConversationForEveryone(conversation: Conversation) {
+    await deleteDirectConversationForEveryone(client, conversation.id)
+    setConversations((current) => current.filter((entry) => entry.id !== conversation.id))
+    setConversationPreferences((current) => {
+      const next = { ...current }
+      delete next[conversation.id]
+      return next
+    })
+    setActionConversationId('')
+    if (selectedId === conversation.id) {
+      setSelectedId('')
+      setMobileChatOpen(false)
+    }
+  }
+
+  async function blockConversationUser(conversation: Conversation, targetUserId: string) {
+    await blockUser(client, targetUserId)
+    setActionConversationId('')
+    if (selectedId === conversation.id) {
+      setSelectedId('')
+      setMobileChatOpen(false)
+    }
+    await refreshConversations()
+  }
+
+  return (
+    <main className="h-[100dvh] w-full overflow-hidden bg-md3-background text-md3-onBackground">
+      <div className="app-shell flex h-full w-full overflow-hidden bg-md3-surface">
+        <aside className={`app-sidebar ${mobileChatOpen ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-md3-outlineVariant/60 bg-md3-surfaceContainerLow md:w-[320px] lg:w-[360px]`}>
+          <header className="flex items-center justify-between px-5 pb-4 pt-5">
+            <BrandMark />
+            <button
+              aria-label="Manage trusted devices"
+              className="relative grid h-11 w-11 place-items-center rounded-full text-md3-onSurfaceVariant transition hover:bg-md3-surfaceContainer"
+              onClick={() => {
+                setDevicesOpen(true)
+                void refreshDeviceRequests().catch((reason: unknown) => setError(messageFromError(reason)))
+              }}
+              type="button"
+            >
+              <Smartphone size={19} />
+              {pendingCount > 0 && <span className="absolute right-2 top-2 h-2.5 w-2.5 rounded-full bg-md3-error ring-2 ring-md3-surfaceContainerLow" />}
+            </button>
+          </header>
+          <div className="px-5 pb-4">
+            <div className="flex items-center gap-2 rounded-2xl bg-md3-surface px-4 py-3 text-sm text-md3-onSurfaceVariant">
+              <Search size={17} />
+              <span className="truncate">Your handle</span>
+              <code className="ml-auto truncate font-semibold tracking-wider text-md3-onBackground"><Handle value={username} /></code>
+              <button aria-label="Copy your Sloppy username" className="rounded-full p-1.5 text-md3-primary hover:bg-md3-primaryContainer/60" onClick={() => void copyHandle()} type="button">
+                {handleCopied ? <Check size={15} /> : <Copy size={15} />}
+              </button>
+            </div>
+          </div>
+          <div className="flex items-center justify-between px-5 pb-3">
+            <h2 className="text-sm font-semibold text-md3-onSurfaceVariant">Conversations</h2>
+            <button
+              aria-label="New conversation"
+              className="grid h-12 w-12 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer shadow-sm transition hover:scale-[1.03]"
+              onClick={() => setNewChatOpen(true)}
+              type="button"
+            >
+              <Plus size={23} />
+            </button>
+          </div>
+          <div className="px-4 pb-3">
+            <button
+              className="flex w-full items-center justify-between rounded-2xl bg-md3-surface px-4 py-3 text-left text-sm font-semibold text-md3-onSurface transition hover:bg-md3-surfaceContainer"
+              onClick={() => {
+                setMessageRequestsOpen(true)
+                void loadIncomingMessageRequests(client)
+                  .then(setMessageRequests)
+                  .catch((reason: unknown) => setError(messageFromError(reason)))
+              }}
+              type="button"
+            >
+              <span>Message Requests</span>
+              {messageRequests.length > 0 && (
+                <span className="grid min-h-6 min-w-6 place-items-center rounded-full bg-md3-primary text-xs font-bold text-md3-onPrimary">
+                  {messageRequests.length}
+                </span>
+              )}
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+            {visibleConversations.length === 0 ? (
+              <div className="empty-state mx-2 mt-4 rounded-3xl bg-md3-surface p-5 text-center">
+                <MessageCircle className="mx-auto text-md3-primary" size={25} />
+                <p className="mt-3 text-sm font-semibold text-md3-onBackground">Start a conversation</p>
+                <p className="mt-1 text-xs leading-5 text-md3-onSurfaceVariant">Find someone by their generated Sloppy username.</p>
+              </div>
+            ) : visibleConversations.map((conversation) => {
+              const members = conversation.conversation_members.length
+              return (
+                <div className="conversation-item mb-1.5 flex items-center rounded-2xl" key={conversation.id}>
+                  <button
+                    className={`flex min-w-0 flex-1 items-center gap-3 rounded-2xl px-3 py-3 text-left transition ${selectedId === conversation.id ? 'bg-md3-primaryContainer/75' : 'hover:bg-md3-surface'}`}
+                    onClick={() => {
+                      setSelectedId(conversation.id)
+                      setMobileChatOpen(true)
+                    }}
+                    type="button"
+                  >
+                    <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-md3-surface text-md3-primary">
+                      {conversation.kind === 'group' ? <Users size={20} /> : <MessageCircle size={20} />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold text-md3-onBackground">
+                        <ConversationLabel conversation={conversation} currentUserId={userId} nickname={savedNicknames[conversation.id]} />
+                      </p>
+                      <p className="mt-1 truncate text-xs text-md3-onSurfaceVariant">
+                        {conversation.kind === 'group' ? `${members} members · Encrypted` : 'Encrypted conversation'}
+                      </p>
+                    </div>
+                    <ChevronDown className="-rotate-90 text-md3-outline" size={16} />
+                  </button>
+                  <button aria-label="Conversation actions" className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surface" onClick={() => setActionConversationId(conversation.id)} title="Conversation actions" type="button">
+                    <MoreHorizontal size={18} />
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+          <footer className="flex items-center justify-between border-t border-md3-outlineVariant/60 px-5 py-4">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold"><Handle value={username} /></p>
+              <p className="mt-0.5 flex items-center gap-1 text-xs text-md3-onSurfaceVariant"><ShieldCheck size={13} /> Device trusted</p>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <button aria-label="Settings" className="grid h-10 w-10 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surface" onClick={() => setSettingsOpen(true)} title="Settings" type="button">
+                <Settings size={18} />
+              </button>
+              <button aria-label="Sign out" className="grid h-10 w-10 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surface" onClick={signOut} title="Sign out" type="button">
+                <LogOut size={18} />
+              </button>
+            </div>
+          </footer>
+        </aside>
+        <section className={`${mobileChatOpen ? 'flex' : 'hidden md:flex'} min-w-0 flex-1 flex-col bg-md3-surface`}>
+          {selectedConversation && deviceState ? (
+            <ChatRoom
+              key={selectedConversation.id}
+              client={client}
+              conversation={selectedConversation}
+              onBack={() => setMobileChatOpen(false)}
+              onError={setError}
+              session={session}
+              vault={deviceState.vault}
+              nickname={savedNicknames[selectedConversation.id]}
+              clearedAt={conversationPreferences[selectedConversation.id]?.cleared_at}
+              notificationsEnabled={notificationsEnabled}
+              onEditNickname={() => setNicknameConversationId(selectedConversation.id)}
+              onManageConversation={() => setActionConversationId(selectedConversation.id)}
+            />
+          ) : (
+            <div className="grid flex-1 place-items-center px-6 py-10">
+              <div className="empty-state max-w-sm text-center">
+                <div className="mx-auto grid h-20 w-20 place-items-center rounded-3xl bg-md3-primaryContainer text-md3-onPrimaryContainer">
+                  <LockKeyhole size={32} />
+                </div>
+                <h1 className="mt-6 text-2xl font-semibold tracking-tight">A quieter kind of chat</h1>
+                <p className="mt-3 leading-7 text-md3-onSurfaceVariant">Choose a conversation or start a new one. Messages are encrypted in your browser before they reach Supabase.</p>
+                <button className="mt-6 inline-flex items-center gap-2 rounded-full bg-md3-primary px-5 py-3 font-semibold text-md3-onPrimary shadow-sm" onClick={() => setNewChatOpen(true)} type="button">
+                  <Plus size={18} />
+                  New conversation
+                </button>
+              </div>
+            </div>
+          )}
+          {error && (
+            <div className="notice-toast fixed bottom-5 left-1/2 z-40 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer shadow-lift" role="alert">
+              <ShieldAlert className="shrink-0" size={17} />
+              <span>{error}</span>
+              <button aria-label="Dismiss error" className="shrink-0 rounded-full p-1 hover:bg-black/5" onClick={() => setError('')} type="button"><X size={16} /></button>
+            </div>
+          )}
+        </section>
+      </div>
+      {newChatOpen && (
+        <NewConversationDialog
+          acceptedHandles={conversations
+            .filter((conversation) => conversation.kind === 'direct')
+            .flatMap((conversation) => conversation.conversation_members
+              .filter((member) => member.user_id !== userId)
+              .map(memberUsername)
+              .filter((handle): handle is string => Boolean(handle)))}
+          onClose={() => setNewChatOpen(false)}
+          onCreate={startConversation}
+        />
+      )}
+      {devicesOpen && (
+        <DeviceDialog
+          busyDeviceId={busyDeviceId}
+          onApprove={approvePendingDevice}
+          onClose={() => setDevicesOpen(false)}
+          onRevoke={revokeTrustedDevice}
+          onRefresh={refreshDeviceRequests}
+          currentDeviceId={deviceState.vault.deviceId}
+          pendingDevices={deviceState.pendingDevices}
+          trustedDevices={deviceState.trustedDevices}
+        />
+      )}
+      {editingNicknameConversation && (
+        <NicknameDialog
+          conversation={editingNicknameConversation}
+          currentUserId={userId}
+          nickname={savedNicknames[editingNicknameConversation.id] ?? ''}
+          onClose={() => setNicknameConversationId('')}
+          onSave={(nickname) => saveConversationNickname(editingNicknameConversation.id, nickname)}
+        />
+      )}
+      {messageRequestsOpen && deviceState.status === 'active' && (
+        <MessageRequestsDialog
+          client={client}
+          onClose={() => setMessageRequestsOpen(false)}
+          onRespond={handleMessageRequest}
+          requests={messageRequests}
+          vault={deviceState.vault}
+        />
+      )}
+      {settingsOpen && (
+        <SettingsDialog
+          client={client}
+          notificationsEnabled={notificationsEnabled}
+          onClose={() => setSettingsOpen(false)}
+          onNotificationsChange={(enabled) => void changeNotificationPreference(enabled)}
+          onOpenDevices={() => {
+            setSettingsOpen(false)
+            setDevicesOpen(true)
+            void refreshDeviceRequests().catch((reason: unknown) => setError(messageFromError(reason)))
+          }}
+          onOpenRequests={() => {
+            setSettingsOpen(false)
+            setMessageRequestsOpen(true)
+            void loadIncomingMessageRequests(client)
+              .then(setMessageRequests)
+              .catch((reason: unknown) => setError(messageFromError(reason)))
+          }}
+          onThemeChange={onThemeChange}
+          theme={theme}
+          username={username}
+        />
+      )}
+      {actionConversation && (
+        <ConversationActionsDialog
+          conversation={actionConversation}
+          currentUserId={userId}
+          nickname={savedNicknames[actionConversation.id] ?? ''}
+          onBlock={(targetUserId) => blockConversationUser(actionConversation, targetUserId)}
+          onClear={() => clearConversationForMe(actionConversation)}
+          onClose={() => setActionConversationId('')}
+          onDeleteForEveryone={() => deleteConversationForEveryone(actionConversation)}
+          onHide={() => hideConversationFromMe(actionConversation)}
+          onRename={() => {
+            setActionConversationId('')
+            setNicknameConversationId(actionConversation.id)
+          }}
+        />
+      )}
+    </main>
+  )
+}
+
+function ChatRoom({
+  client,
+  conversation,
+  onBack,
+  onError,
+  session,
+  vault,
+  nickname,
+  clearedAt,
+  notificationsEnabled,
+  onEditNickname,
+  onManageConversation
+}: {
+  client: SupabaseClient
+  conversation: Conversation
+  onBack: () => void
+  onError: (message: string) => void
+  session: Session
+  vault: DeviceVault
+  nickname?: string
+  clearedAt?: string | null
+  notificationsEnabled: boolean
+  onEditNickname: () => void
+  onManageConversation: () => void
+}) {
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [draft, setDraft] = useState('')
+  const [imageFile, setImageFile] = useState<File | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [sending, setSending] = useState(false)
+  const [peerIdentities, setPeerIdentities] = useState<Array<{
+    userId: string
+    username: string
+    fingerprint: string
+    status: 'verified' | 'unverified' | 'changed' | 'missing' | 'conflict'
+  }>>([])
+  const [localVault, setLocalVault] = useState(vault)
+  const messageEnd = useRef<HTMLDivElement>(null)
+  const draftField = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    const field = draftField.current
+    if (!field) {
+      return
+    }
+    field.style.height = 'auto'
+    field.style.height = `${Math.min(field.scrollHeight, 144)}px`
+    field.style.overflowY = field.scrollHeight > 144 ? 'auto' : 'hidden'
+  }, [draft])
+
+  useEffect(() => {
+    let active = true
+    const channel = client
+      .channel(`sloppy:${conversation.id}:${localVault.deviceId}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `conversation_id=eq.${conversation.id}`
+      }, (payload) => {
+        const row = payload.new as unknown as StoredMessage
+        if (clearedAt && row.created_at <= clearedAt) {
+          return
+        }
+        void loadConversationDevices(client, conversation.id)
+          .then((devices) => decryptRealtimeMessage(conversation.id, localVault, row, devices))
+          .then((message) => {
+            if (active) {
+              if (
+                notificationsEnabled
+                && message.sender_id !== session.user.id
+                && document.hidden
+                && 'Notification' in window
+                && Notification.permission === 'granted'
+              ) {
+                new Notification('New encrypted message', { body: 'Open Sloppy to read it.', tag: conversation.id })
+              }
+              setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message])
+            }
+          })
+          .catch((reason: unknown) => {
+            if (active) {
+              onError(messageFromError(reason))
+            }
+          })
+      })
+      .subscribe((status) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          onError('Realtime connection failed. Check your Supabase Realtime setup and reconnect.')
+        }
+      })
+    const devicesPromise = loadConversationDevices(client, conversation.id)
+    Promise.all([
+      devicesPromise,
+      devicesPromise.then((devices) => loadMessages(client, conversation.id, localVault, devices, clearedAt))
+    ])
+      .then(async ([devices, loaded]) => {
+        if (active) {
+          setMessages((current) => {
+            const visible = current.filter((message) => !clearedAt || message.created_at > clearedAt)
+            const byId = new Map(visible.map((message) => [message.id, message]))
+            for (const message of loaded) {
+              byId.set(message.id, message)
+            }
+            return [...byId.values()].sort((left, right) => left.created_at.localeCompare(right.created_at))
+          })
+          const expectedPeers = conversation.conversation_members.filter((member) => member.user_id !== session.user.id)
+          const identities = await Promise.all(expectedPeers.map(async (member) => {
+            const userDevices = devices.filter((candidate) => candidate.userId === member.user_id)
+            const device = userDevices[0]
+            if (!device) {
+              return {
+                userId: member.user_id,
+                username: memberUsername(member) ?? 'Group member',
+                fingerprint: '',
+                status: 'missing' as const
+              }
+            }
+            const fingerprints = await Promise.all(userDevices.map((candidate) => identityFingerprint(candidate.identitySigningPublic)))
+            const fingerprint = fingerprints[0]
+            if (new Set(fingerprints).size !== 1) {
+              return {
+                userId: member.user_id,
+                username: device.username,
+                fingerprint,
+                status: 'conflict' as const
+              }
+            }
+            const pin = localVault.peerPins?.[member.user_id]
+            return {
+              userId: member.user_id,
+              username: device.username,
+              fingerprint,
+              status: pin === fingerprint ? 'verified' as const : pin ? 'changed' as const : 'unverified' as const
+            }
+          }))
+          setPeerIdentities(identities)
+        }
+      })
+      .catch((reason: unknown) => {
+        if (active) {
+          onError(messageFromError(reason))
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setLoading(false)
+        }
+      })
+    return () => {
+      active = false
+      void client.removeChannel(channel)
+    }
+  }, [client, conversation, clearedAt, localVault, notificationsEnabled, onError, session.user.id])
+
+  useEffect(() => {
+    messageEnd.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  async function submitMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const text = draft.trim()
+    if ((!text && !imageFile) || sending) {
+      return
+    }
+    setSending(true)
+    try {
+      const expectedUserIds = conversation.conversation_members.map((member) => member.user_id)
+      let payload = text
+      if (imageFile) {
+        payload = await uploadEncryptedImage(client, conversation.id, session.user.id, imageFile, text)
+      }
+      let message: ChatMessage
+      try {
+        message = await sendMessage(client, conversation.id, session.user.id, expectedUserIds, localVault, payload)
+      } catch (reason) {
+        if (imageFile) {
+          await removeUploadedImage(client, payload).catch(() => undefined)
+        }
+        throw reason
+      }
+      setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message])
+      setDraft('')
+      setImageFile(null)
+    } catch (reason) {
+      onError(messageFromError(reason))
+    } finally {
+      setSending(false)
+    }
+  }
+
+  async function trustPeer(peer: typeof peerIdentities[number]) {
+    if (!peer.fingerprint || peer.status === 'missing' || peer.status === 'conflict') {
+      return
+    }
+    try {
+      const nextVault = {
+        ...localVault,
+        peerPins: { ...localVault.peerPins, [peer.userId]: peer.fingerprint }
+      }
+      await saveDeviceVault(nextVault)
+      setLocalVault(nextVault)
+      setPeerIdentities((current) => current.map((identity) => identity.userId === peer.userId
+        ? { ...identity, status: 'verified' }
+        : identity))
+    } catch (reason) {
+      onError(messageFromError(reason))
+    }
+  }
+
+  async function copyPeerCode(peer: typeof peerIdentities[number]) {
+    try {
+      await navigator.clipboard.writeText(peer.fingerprint)
+    } catch (reason) {
+      onError(messageFromError(reason))
+    }
+  }
+
+  const unverifiedPeers = peerIdentities.filter((peer) => peer.status !== 'verified')
+
+  return (
+    <>
+      <header className="chat-header flex items-center gap-3 border-b border-md3-outlineVariant/50 px-4 py-4 sm:px-7">
+        <button aria-label="Back to conversations" className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surfaceContainerLow md:hidden" onClick={onBack} type="button">
+          <ArrowLeft size={19} />
+        </button>
+        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-md3-secondaryContainer text-md3-onSecondaryContainer">
+          {conversation.kind === 'group' ? <Users size={19} /> : <MessageCircle size={19} />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate font-semibold">
+            <ConversationLabel conversation={conversation} currentUserId={session.user.id} nickname={nickname} />
+          </h1>
+          <p className="mt-0.5 flex items-center gap-1.5 text-xs text-md3-onSurfaceVariant">
+            <LockKeyhole size={12} />
+            End-to-end encrypted
+          </p>
+        </div>
+        <button
+          aria-label="Edit conversation nickname"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surfaceContainerLow"
+          onClick={onEditNickname}
+          title="Edit conversation nickname"
+          type="button"
+        >
+          <Pencil size={17} />
+        </button>
+        <button aria-label="Conversation actions" className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surfaceContainerLow" onClick={onManageConversation} title="Conversation actions" type="button">
+          <MoreHorizontal size={18} />
+        </button>
+        <div className="hidden items-center gap-2 rounded-full bg-md3-surfaceContainerLow px-3 py-2 text-xs font-medium text-md3-onSurfaceVariant sm:flex">
+          <ShieldCheck className="text-md3-primary" size={15} />
+          Only trusted devices
+        </div>
+      </header>
+      <div className="chat-scroll flex min-h-0 flex-1 flex-col overflow-y-auto bg-md3-background px-4 py-5 sm:px-8">
+        <div className="mx-auto mb-6 max-w-lg rounded-2xl border border-md3-outlineVariant/60 bg-md3-surface px-4 py-3 text-center text-xs leading-5 text-md3-onSurfaceVariant">
+          Messages are encrypted in your browser. The server stores ciphertext and routing metadata, not message text.
+        </div>
+        {peerIdentities.length > 0 && unverifiedPeers.length > 0 && (
+          <section className="identity-panel mx-auto mb-5 w-full max-w-3xl rounded-3xl border border-md3-tertiary/20 bg-md3-tertiaryContainer/45 p-4 sm:p-5">
+            <div className="flex items-start gap-3">
+              <ShieldAlert className="mt-0.5 shrink-0 text-md3-tertiary" size={18} />
+              <div className="min-w-0 flex-1">
+                <h2 className="text-sm font-semibold text-md3-onTertiaryContainer">Verify safety codes before chatting</h2>
+                <p className="mt-1 text-xs leading-5 text-md3-onTertiaryContainer/80">Compare each code with the person through a separate trusted channel. Sending stays locked until you verify it on this device.</p>
+              </div>
+            </div>
+            <div className="mt-4 space-y-3">
+              {unverifiedPeers.map((peer) => (
+                <div className="rounded-2xl bg-md3-surface/80 p-3 sm:flex sm:items-center sm:gap-4" key={peer.userId}>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold"><Handle value={peer.username} /></p>
+                    <code className="mt-1 block break-all text-[10px] leading-5 tracking-wide text-md3-onSurfaceVariant">
+                      {peer.status === 'missing' ? 'No approved device yet' : peer.fingerprint}
+                    </code>
+                    {peer.status === 'changed' && <p className="mt-1 text-xs font-medium text-md3-error">The safety code changed. Verify this change independently.</p>}
+                    {peer.status === 'conflict' && <p className="mt-1 text-xs font-medium text-md3-error">The account's trusted device keys disagree. Do not send until resolved.</p>}
+                  </div>
+                  {peer.status !== 'missing' && peer.status !== 'conflict' && (
+                    <div className="mt-3 flex shrink-0 gap-2 sm:mt-0">
+                      <button className="rounded-full border border-md3-outlineVariant px-3 py-2.5 text-xs font-semibold text-md3-onSurfaceVariant" onClick={() => void copyPeerCode(peer)} type="button">
+                        Copy code
+                      </button>
+                      <button className="rounded-full bg-md3-primary px-3 py-2.5 text-xs font-semibold text-md3-onPrimary" onClick={() => void trustPeer(peer)} type="button">
+                        {peer.status === 'changed' ? 'Verify new code' : 'I compared this code'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+        {loading ? (
+          <div className="flex flex-1 items-center justify-center text-sm text-md3-onSurfaceVariant">
+            <LoaderCircle className="mr-2 animate-spin" size={17} /> Decrypting this device's history
+          </div>
+        ) : messages.length === 0 ? (
+          <div className="flex flex-1 items-center justify-center text-center">
+            <div className="max-w-xs">
+              <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><LockKeyhole size={22} /></div>
+              <p className="mt-4 font-semibold">This conversation is ready</p>
+              <p className="mt-1 text-sm leading-6 text-md3-onSurfaceVariant">Send the first encrypted message.</p>
+            </div>
+          </div>
+        ) : (
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-3">
+            {messages.map((message) => {
+              const ownMessage = message.sender_id === session.user.id
+              const sender = conversation.conversation_members.find((member) => member.user_id === message.sender_id)
+              const senderName = sender ? memberUsername(sender) : undefined
+              const imageAttachment = message.untrusted ? null : parseImageAttachment(message.text)
+              return (
+                <div className={`message-row flex ${ownMessage ? 'justify-end' : 'justify-start'}`} key={message.id}>
+                  <div className={`max-w-[85%] rounded-3xl px-4 py-3 sm:max-w-[75%] ${ownMessage ? 'rounded-br-lg bg-md3-primary text-md3-onPrimary' : 'rounded-bl-lg bg-md3-surfaceContainer text-md3-onSurface'}`}>
+                    {!ownMessage && conversation.kind === 'group' && (
+                      <p className="mb-1 text-[11px] font-semibold text-md3-primary">
+                        {senderName ? <Handle value={senderName} /> : 'Group member'}
+                      </p>
+                    )}
+                    {imageAttachment ? (
+                      <EncryptedImageView client={client} conversationId={conversation.id} attachment={imageAttachment} />
+                    ) : (
+                      <p className={`whitespace-pre-wrap break-words text-sm leading-6 ${message.text === null ? 'italic opacity-75' : ''}`}>
+                        {message.untrusted
+                          ? 'Message hidden until this sender identity is verified'
+                          : message.text ?? 'Not encrypted for this device'}
+                      </p>
+                    )}
+                    {imageAttachment?.caption && <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{imageAttachment.caption}</p>}
+                    <time className={`mt-1 block text-right text-[10px] ${ownMessage ? 'text-md3-onPrimary/70' : 'text-md3-onSurfaceVariant'}`} dateTime={message.created_at}>
+                      {new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(message.created_at))}
+                    </time>
+                  </div>
+                </div>
+              )
+            })}
+            <div ref={messageEnd} />
+          </div>
+        )}
+      </div>
+      <form className="message-composer border-t border-md3-outlineVariant/50 bg-md3-surface p-4 sm:px-7 sm:py-5" onSubmit={submitMessage}>
+        {imageFile && (
+          <div className="mx-auto mb-2 flex max-w-3xl items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-2 text-xs">
+            <ImagePlus className="shrink-0 text-md3-primary" size={16} />
+            <span className="min-w-0 flex-1 truncate">{imageFile.name} · {(imageFile.size / 1024).toFixed(0)} KB</span>
+            <button aria-label="Remove image attachment" className="grid h-8 w-8 place-items-center rounded-full hover:bg-md3-surface" onClick={() => setImageFile(null)} type="button"><X size={15} /></button>
+          </div>
+        )}
+        <div className={`message-entry mx-auto flex max-w-3xl items-end gap-3 rounded-3xl bg-md3-surfaceContainerLow p-2 pl-4 ${draft ? 'has-draft' : ''}`}>
+          <label aria-label="Attach an image up to 2 MB" className="grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-2xl text-md3-onSurfaceVariant hover:bg-md3-surface" title="Attach image (max 2 MB)">
+            <ImagePlus size={19} />
+            <input accept="image/png,image/jpeg,image/webp,image/gif,image/avif" className="sr-only" onChange={(event) => {
+              const file = event.target.files?.[0]
+              event.target.value = ''
+              if (!file) return
+              void validateImageFile(file)
+                .then(() => setImageFile(file))
+                .catch((reason: unknown) => onError(messageFromError(reason)))
+            }} type="file" />
+          </label>
+          <textarea
+            aria-label="Message"
+        className="message-textarea max-h-36 min-h-11 flex-1 resize-none bg-transparent py-2.5 text-sm leading-6 placeholder:text-md3-outline"
+            maxLength={4000}
+            onChange={(event) => setDraft(event.target.value)}
+        ref={draftField}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault()
+                event.currentTarget.form?.requestSubmit()
+              }
+            }}
+            placeholder="Write an encrypted message"
+            rows={1}
+            value={draft}
+          />
+          <button
+            aria-label="Send encrypted message"
+            className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-md3-primary text-md3-onPrimary shadow-sm transition hover:brightness-95 disabled:opacity-50"
+            disabled={sending || (!draft.trim() && !imageFile) || unverifiedPeers.length > 0}
+            type="submit"
+          >
+            {sending ? <LoaderCircle className="animate-spin" size={18} /> : <Send size={18} />}
+          </button>
+        </div>
+        <p className="mx-auto mt-2 max-w-3xl px-2 text-[10px] text-md3-onSurfaceVariant">Enter to send · Shift + Enter for a new line</p>
+      </form>
+    </>
+  )
+}
+
+function EncryptedImageView({
+  client,
+  conversationId,
+  attachment
+}: {
+  client: SupabaseClient
+  conversationId: string
+  attachment: ImageAttachment
+}) {
+  const [imageUrl, setImageUrl] = useState('')
+  const [error, setError] = useState('')
+  const { path, key, iv, mediaType, caption } = attachment
+
+  useEffect(() => {
+    let active = true
+    let objectUrl = ''
+    void decryptImageAttachment(client, conversationId, { path, key, iv, mediaType, caption })
+      .then((image) => {
+        objectUrl = URL.createObjectURL(image)
+        if (active) setImageUrl(objectUrl)
+        else URL.revokeObjectURL(objectUrl)
+      })
+      .catch((reason: unknown) => {
+        if (active) setError(messageFromError(reason))
+      })
+    return () => {
+      active = false
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [client, conversationId, path, key, iv, mediaType, caption])
+
+  if (error) return <p className="text-xs text-md3-error" role="alert">Image unavailable: {error}</p>
+  if (!imageUrl) return <div aria-label="Decrypting image" className="grid h-32 w-48 place-items-center rounded-2xl bg-md3-surfaceContainerLow"><LoaderCircle className="animate-spin text-md3-primary" size={20} /></div>
+  return <img alt={caption || 'Encrypted image attachment'} className="max-h-80 max-w-full rounded-2xl object-contain" loading="lazy" src={imageUrl} />
+}
+
+function MessageRequestsDialog({
+  client,
+  onClose,
+  onRespond,
+  requests,
+  vault
+}: {
+  client: SupabaseClient
+  onClose: () => void
+  onRespond: (request: IncomingMessageRequest, action: 'accept' | 'deny' | 'block') => Promise<void>
+  requests: IncomingMessageRequest[]
+  vault: DeviceVault
+}) {
+  const [selectedId, setSelectedId] = useState('')
+  const [preview, setPreview] = useState<{ requestId: string; message: string; error: string } | null>(null)
+  const [busyAction, setBusyAction] = useState('')
+  const [error, setError] = useState('')
+  const selectedRequest = requests.find((request) => request.request_id === selectedId)
+  const selectedRequestId = selectedRequest?.request_id
+  const selectedRequestSender = selectedRequest?.sender_username
+  const selectedPreview = preview?.requestId === selectedRequestId ? preview : null
+
+  useEffect(() => {
+    if (!selectedRequestId || !selectedRequestSender) {
+      return
+    }
+    let active = true
+    void decryptIncomingMessageRequest(client, selectedRequestId, selectedRequestSender, vault)
+      .then((plaintext) => {
+        if (active) {
+          setPreview({ requestId: selectedRequestId, message: plaintext, error: '' })
+        }
+      })
+      .catch((reason: unknown) => {
+        if (active) {
+          setPreview({ requestId: selectedRequestId, message: '', error: messageFromError(reason) })
+        }
+      })
+    return () => {
+      active = false
+    }
+  }, [client, selectedRequestId, selectedRequestSender, vault])
+
+  async function respond(action: 'accept' | 'deny' | 'block') {
+    if (!selectedRequest) {
+      return
+    }
+    if (action === 'block' && !window.confirm('Block this sender? They will not be able to contact you again or participate in shared conversations.')) {
+      return
+    }
+    setBusyAction(action)
+    setError('')
+    try {
+      await onRespond(selectedRequest, action)
+      if (action === 'accept') {
+        onClose()
+      } else {
+        setSelectedId('')
+      }
+    } catch (reason) {
+      setError(messageFromError(reason))
+    } finally {
+      setBusyAction('')
+    }
+  }
+
+  return (
+    <DialogFrame onClose={onClose}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><MessageCircle size={21} /></div>
+          <h2 className="mt-4 text-xl font-semibold">Message Requests</h2>
+          <p className="mt-1 text-sm leading-6 text-md3-onSurfaceVariant">Open a request to preview its first message before deciding.</p>
+        </div>
+        <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+      </div>
+      {!selectedRequest ? (
+        <div className="mt-6 space-y-2">
+          {requests.length === 0 ? (
+            <div className="rounded-2xl bg-md3-surfaceContainerLow px-4 py-6 text-center text-sm text-md3-onSurfaceVariant">
+              No new message requests.
+            </div>
+          ) : requests.map((request) => (
+            <button
+              className="flex w-full items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3 text-left transition hover:bg-md3-surfaceContainer"
+              key={request.request_id}
+              onClick={() => {
+                setError('')
+                setSelectedId(request.request_id)
+              }}
+              type="button"
+            >
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-md3-primaryContainer text-md3-onPrimaryContainer"><MessageCircle size={17} /></span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-semibold">Message request</span>
+                <span className="mt-1 block truncate text-xs text-md3-onSurfaceVariant">
+                  <Handle value={request.sender_username} />
+                </span>
+              </span>
+              <span className="text-xs text-md3-primary">Preview</span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-6">
+          <button
+            className="mb-4 rounded-full px-3 py-2 text-sm font-semibold text-md3-primary hover:bg-md3-primaryContainer/40"
+            onClick={() => setSelectedId('')}
+            type="button"
+          >
+            <span aria-hidden="true">←</span> All requests
+          </button>
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <span>From</span>
+            <Handle value={selectedRequest.sender_username} />
+          </div>
+          <div className="request-message mt-4 min-h-24 whitespace-pre-wrap break-words rounded-3xl rounded-bl-lg bg-md3-surfaceContainerLow px-4 py-4 text-sm leading-6">
+            {!selectedPreview ? (
+              <span className="flex items-center gap-2 text-md3-onSurfaceVariant"><LoaderCircle className="animate-spin" size={16} />Decrypting request</span>
+            ) : selectedPreview.message}
+          </div>
+          <div className="mt-4 rounded-2xl border border-md3-tertiary/20 bg-md3-tertiaryContainer/40 px-4 py-3 text-xs leading-5 text-md3-onTertiaryContainer">
+            This sender’s identity is not verified yet. Treat the message as untrusted and do not open links. After accepting, compare the safety code before continuing.
+          </div>
+          {(selectedPreview?.error || error) && <p className="mt-4 rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{selectedPreview?.error || error}</p>}
+          <div className="mt-5 grid grid-cols-3 gap-2">
+            <button
+              className="rounded-full border border-md3-outlineVariant px-3 py-3 text-sm font-semibold text-md3-onSurfaceVariant hover:bg-md3-surfaceContainerLow disabled:opacity-50"
+              disabled={Boolean(busyAction)}
+              onClick={() => void respond('deny')}
+              type="button"
+            >
+              {busyAction === 'deny' ? 'Denying…' : 'Deny'}
+            </button>
+            <button
+              className="rounded-full border border-md3-error/40 px-3 py-3 text-sm font-semibold text-md3-error hover:bg-md3-errorContainer disabled:opacity-50"
+              disabled={Boolean(busyAction)}
+              onClick={() => void respond('block')}
+              type="button"
+            >
+              {busyAction === 'block' ? 'Blocking…' : 'Block'}
+            </button>
+            <button
+              className="rounded-full bg-md3-primary px-3 py-3 text-sm font-semibold text-md3-onPrimary hover:brightness-95 disabled:opacity-50"
+              disabled={Boolean(busyAction) || !selectedPreview || Boolean(selectedPreview.error)}
+              onClick={() => void respond('accept')}
+              type="button"
+            >
+              {busyAction === 'accept' ? 'Accepting…' : 'Accept'}
+            </button>
+          </div>
+        </div>
+      )}
+    </DialogFrame>
+  )
+}
+
+function ConversationActionsDialog({
+  conversation,
+  currentUserId,
+  nickname,
+  onBlock,
+  onClear,
+  onClose,
+  onDeleteForEveryone,
+  onHide,
+  onRename
+}: {
+  conversation: Conversation
+  currentUserId: string
+  nickname: string
+  onBlock: (userId: string) => Promise<void>
+  onClear: () => Promise<void>
+  onClose: () => void
+  onDeleteForEveryone: () => Promise<void>
+  onHide: () => Promise<void>
+  onRename: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const otherMembers = conversation.conversation_members.filter((member) => member.user_id !== currentUserId)
+
+  async function run(action: () => Promise<void>) {
+    setBusy(true)
+    setError('')
+    try {
+      await action()
+    } catch (reason) {
+      setError(messageFromError(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <DialogFrame onClose={onClose}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><MoreHorizontal size={20} /></div>
+          <h2 className="mt-3 text-xl font-semibold">Conversation actions</h2>
+          <p className="mt-1 text-sm text-md3-onSurfaceVariant"><ConversationLabel conversation={conversation} currentUserId={currentUserId} nickname={nickname} /></p>
+        </div>
+        <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+      </div>
+      <div className="mt-5 grid gap-2">
+        <button className="flex items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={onRename} type="button"><Pencil size={17} /> Rename for me</button>
+        <button className="flex items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={() => {
+          if (window.confirm('Clear your visible history for this conversation? Other participants will keep their messages.')) {
+            void run(onClear)
+          }
+        }} type="button"><Eraser size={17} /> Clear history for me</button>
+        <button className="flex items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={() => void run(onHide)} type="button"><Archive size={17} /> Remove from my conversations</button>
+      </div>
+      <div className="mt-5 border-t border-md3-outlineVariant/60 pt-4">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-md3-onSurfaceVariant">Block a user</h3>
+        <div className="mt-2 space-y-2">
+          {otherMembers.map((member) => {
+            const handle = memberUsername(member) ?? 'Sloppy user'
+            return (
+              <button className="flex w-full items-center gap-3 rounded-2xl border border-md3-error/30 px-4 py-3 text-left text-sm font-semibold text-md3-error" disabled={busy} key={member.user_id} onClick={() => {
+                if (window.confirm(`Block ${handle}? You will lose access to shared conversations and neither of you can send new requests.`)) {
+                  void run(() => onBlock(member.user_id))
+                }
+              }} type="button"><Ban size={17} /> <Handle value={handle} /></button>
+            )
+          })}
+        </div>
+      </div>
+      {conversation.kind === 'direct' && (
+        <button className="mt-5 flex w-full items-center gap-3 rounded-2xl border border-md3-error/40 px-4 py-3 text-left text-sm font-semibold text-md3-error" disabled={busy} onClick={() => {
+          if (window.confirm('Permanently delete this direct conversation and its encrypted history for both people? This cannot be undone.')) {
+            void run(onDeleteForEveryone)
+          }
+        }} type="button"><Trash2 size={17} /> Delete for both people</button>
+      )}
+      {error && <p className="mt-4 rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{error}</p>}
+    </DialogFrame>
+  )
+}
+
+function NicknameDialog({
+  conversation,
+  currentUserId,
+  nickname,
+  onClose,
+  onSave
+}: {
+  conversation: Conversation
+  currentUserId: string
+  nickname: string
+  onClose: () => void
+  onSave: (nickname: string) => void
+}) {
+  const [value, setValue] = useState(nickname)
+  const members = conversationMemberNames(conversation, currentUserId)
+
+  return (
+    <DialogFrame onClose={onClose}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><Pencil size={20} /></div>
+          <h2 className="mt-4 text-xl font-semibold">Conversation nickname</h2>
+          <p className="mt-1 text-sm leading-6 text-md3-onSurfaceVariant">
+            {conversation.kind === 'group' ? (
+              <>
+                Group with {members.map((member, index) => (
+                  <span key={`${conversation.id}:nickname:${index}`}>
+                    {index > 0 && ', '}
+                    <Handle value={member} />
+                  </span>
+                ))}
+              </>
+            ) : <Handle value={members[0] ?? 'Direct conversation'} />}
+          </p>
+        </div>
+        <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+      </div>
+      <form className="mt-6 space-y-4" onSubmit={(event) => {
+        event.preventDefault()
+        onSave(value.trim())
+      }}>
+        <label className="block text-sm font-medium">
+          Nickname
+          <input
+            autoFocus
+            className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+            maxLength={40}
+            onChange={(event) => setValue(event.target.value)}
+            placeholder={conversation.kind === 'group' ? conversation.title || 'Group name' : 'Contact name'}
+            value={value}
+          />
+        </label>
+        <p className="text-xs leading-5 text-md3-onSurfaceVariant">
+          Nicknames are saved only in this browser. {conversation.kind === 'group'
+            ? 'The group name and member handles remain visible beside it.'
+            : 'The original username remains visible beside it.'}
+        </p>
+        <div className="flex gap-3">
+          {nickname && (
+            <button
+              className="flex-1 rounded-full border border-md3-outlineVariant px-4 py-3 text-sm font-semibold text-md3-onSurfaceVariant hover:bg-md3-surfaceContainerLow"
+              onClick={() => onSave('')}
+              type="button"
+            >
+              Remove
+            </button>
+          )}
+          <button className="flex-1 rounded-full bg-md3-primary px-4 py-3 text-sm font-semibold text-md3-onPrimary" type="submit">
+            Save nickname
+          </button>
+        </div>
+      </form>
+    </DialogFrame>
+  )
+}
+
+function NewConversationDialog({
+  acceptedHandles,
+  onClose,
+  onCreate
+}: {
+  acceptedHandles: string[]
+  onClose: () => void
+  onCreate: (usernames: string[], title: string, firstMessage: string) => Promise<void>
+}) {
+  const [handles, setHandles] = useState('')
+  const [title, setTitle] = useState('')
+  const [firstMessage, setFirstMessage] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const usernames = handles.split(',').map((handle) => handle.trim().toLowerCase()).filter(Boolean)
+  const isDirectRequest = usernames.length === 1
+  const isExistingConversation = isDirectRequest && acceptedHandles.includes(usernames[0])
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError('')
+    const names = handles.split(',').map((handle) => handle.trim().toLowerCase()).filter(Boolean)
+    if (names.length === 0) {
+      setError('Enter at least one Sloppy username.')
+      return
+    }
+    if (names.some((name) => !isValidUsername(name))) {
+      setError('Every username must be 12 characters.')
+      return
+    }
+    if (names.length === 1 && !firstMessage.trim()) {
+      setError('Write a first message to send with your request.')
+      return
+    }
+    setBusy(true)
+    try {
+      await onCreate(names, title, firstMessage.trim())
+    } catch (reason) {
+      setError(messageFromError(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <DialogFrame onClose={onClose}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><MessageCircle size={21} /></div>
+          <h2 className="mt-4 text-xl font-semibold">New conversation</h2>
+          <p className="mt-1 text-sm leading-6 text-md3-onSurfaceVariant">
+            {isExistingConversation
+              ? 'Send a message in your existing encrypted conversation.'
+              : isDirectRequest
+                ? 'A new one-to-one conversation starts with a message request that the other person can accept or decline.'
+                : 'Start a group with people who already have a direct conversation with you.'}
+          </p>
+        </div>
+        <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+      </div>
+      <form className="mt-6 space-y-4" onSubmit={submit}>
+        <label className="block text-sm font-medium">
+          Sloppy usernames
+          <input
+            autoFocus
+            className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+            onChange={(event) => setHandles(event.target.value)}
+            placeholder="Enter one or more handles"
+            required
+            value={handles}
+          />
+        </label>
+        {isDirectRequest ? (
+          <label className="block text-sm font-medium">
+            {isExistingConversation ? 'Message' : 'First message'}
+            <textarea
+              className="mt-2 min-h-28 w-full resize-y rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+              maxLength={4000}
+              onChange={(event) => setFirstMessage(event.target.value)}
+              placeholder={isExistingConversation ? 'Write an encrypted message' : 'Write a short introduction'}
+              required
+              value={firstMessage}
+            />
+          </label>
+        ) : usernames.length > 1 ? (
+          <label className="block text-sm font-medium">
+            Group name <span className="font-normal text-md3-onSurfaceVariant">(optional)</span>
+            <input
+              className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+              maxLength={80}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="Name this group"
+              value={title}
+            />
+          </label>
+        ) : null}
+        {error && <p className="rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{error}</p>}
+        <button className="flex w-full items-center justify-center gap-2 rounded-full bg-md3-primary px-5 py-3.5 font-semibold text-md3-onPrimary disabled:opacity-60" disabled={busy} type="submit">
+          {busy ? <LoaderCircle className="animate-spin" size={18} /> : <Plus size={18} />}
+          {isExistingConversation ? 'Send message' : isDirectRequest ? 'Send message request' : 'Create group'}
+        </button>
+      </form>
+    </DialogFrame>
+  )
+}
+
+function DeviceDialog({
+  busyDeviceId,
+  currentDeviceId,
+  onApprove,
+  onClose,
+  onRevoke,
+  onRefresh,
+  pendingDevices,
+  trustedDevices
+}: {
+  busyDeviceId: string
+  currentDeviceId: string
+  onApprove: (device: StoredDevice) => Promise<void>
+  onClose: () => void
+  onRevoke: (device: StoredDevice) => Promise<void>
+  onRefresh: () => Promise<void>
+  pendingDevices: StoredDevice[]
+  trustedDevices: StoredDevice[]
+}) {
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState('')
+  const [approvalError, setApprovalError] = useState('')
+  async function refresh() {
+    setRefreshing(true)
+    setRefreshError('')
+    try {
+      await onRefresh()
+    } catch (reason) {
+      setRefreshError(messageFromError(reason))
+    } finally {
+      setRefreshing(false)
+    }
+  }
+  return (
+    <DialogFrame onClose={onClose}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-md3-tertiaryContainer text-md3-onTertiaryContainer"><Smartphone size={21} /></div>
+          <h2 className="mt-4 text-xl font-semibold">Trusted devices</h2>
+          <p className="mt-1 text-sm leading-6 text-md3-onSurfaceVariant">Compare each request code with the new browser before approving. It will not receive earlier messages.</p>
+        </div>
+        <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+      </div>
+      <div className="mt-6 space-y-3">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-md3-onSurfaceVariant">Approved browsers</h3>
+        {trustedDevices.map((device) => (
+          <div className="flex items-center gap-3 rounded-2xl border border-md3-outlineVariant/70 p-4" key={device.device_id}>
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><ShieldCheck size={18} /></div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold">{device.label}{device.device_id === currentDeviceId ? ' · This browser' : ''}</p>
+              <p className="truncate text-xs text-md3-onSurfaceVariant">{device.device_id}</p>
+            </div>
+            {device.device_id !== currentDeviceId && (
+              <button
+                className="rounded-full border border-md3-outlineVariant px-3 py-2 text-xs font-semibold text-md3-error disabled:opacity-50"
+                disabled={busyDeviceId === device.device_id}
+                onClick={() => {
+                  setApprovalError('')
+                  void onRevoke(device).catch((reason: unknown) => setApprovalError(messageFromError(reason)))
+                }}
+                type="button"
+              >
+                Revoke
+              </button>
+            )}
+          </div>
+        ))}
+        <h3 className="pt-3 text-xs font-semibold uppercase tracking-wider text-md3-onSurfaceVariant">Pending requests</h3>
+        {pendingDevices.length === 0 ? (
+          <div className="rounded-2xl bg-md3-surfaceContainerLow p-4 text-sm text-md3-onSurfaceVariant">No pending device requests.</div>
+        ) : pendingDevices.map((device) => (
+          <div className="flex items-center gap-3 rounded-2xl border border-md3-outlineVariant/70 p-4" key={device.device_id}>
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-md3-surfaceContainer text-md3-primary"><Smartphone size={18} /></div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold">{device.label}</p>
+              <p className="truncate text-xs text-md3-onSurfaceVariant">Code: {device.device_id}</p>
+            </div>
+            <button
+              className="rounded-full bg-md3-primaryContainer px-3 py-2 text-xs font-semibold text-md3-onPrimaryContainer disabled:opacity-50"
+              disabled={busyDeviceId === device.device_id}
+              onClick={() => {
+                setApprovalError('')
+                void onApprove(device).catch((reason: unknown) => setApprovalError(messageFromError(reason)))
+              }}
+              type="button"
+            >
+              {busyDeviceId === device.device_id ? 'Approving' : 'Approve'}
+            </button>
+          </div>
+        ))}
+      </div>
+      {approvalError && <p className="mt-4 rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{approvalError}</p>}
+      {refreshError && <p className="mt-4 rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{refreshError}</p>}
+      <button className="mt-5 flex w-full items-center justify-center gap-2 rounded-full border border-md3-outlineVariant px-5 py-3 text-sm font-semibold hover:bg-md3-surfaceContainerLow disabled:opacity-60" disabled={refreshing} onClick={() => void refresh()} type="button">
+        {refreshing ? <LoaderCircle className="animate-spin" size={17} /> : <ShieldCheck size={17} />}
+        Refresh requests
+      </button>
+    </DialogFrame>
+  )
+}
+
+function DialogFrame({ children, onClose }: { children: ReactNode; onClose: () => void }) {
+  return (
+    <div className="dialog-backdrop fixed inset-0 z-50 grid place-items-center bg-md3-onBackground/35 p-4 backdrop-blur-sm" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) {
+        onClose()
+      }
+    }}>
+      <section aria-modal="true" className="dialog-panel max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl bg-md3-surface p-6 shadow-lift sm:p-8" role="dialog">
+        {children}
+      </section>
+    </div>
+  )
+}
+
+function ProblemScreen({ error, onSignOut }: { error: string; onSignOut: () => void }) {
+  return (
+    <main className="grid min-h-screen place-items-center bg-md3-background px-5 py-10">
+      <section className="w-full max-w-lg rounded-3xl bg-md3-surface p-8 shadow-lift">
+        <BrandMark />
+        <div className="mt-8 grid h-14 w-14 place-items-center rounded-2xl bg-md3-errorContainer text-md3-onErrorContainer"><ShieldAlert size={25} /></div>
+        <h1 className="mt-5 text-2xl font-semibold">Could not open your workspace</h1>
+        <p className="mt-3 leading-7 text-md3-onSurfaceVariant">{error}</p>
+        <button className="mt-6 flex items-center gap-2 rounded-full bg-md3-surfaceContainer px-5 py-3 text-sm font-semibold" onClick={onSignOut} type="button">
+          <LogOut size={17} />
+          Sign out
+        </button>
+      </section>
+    </main>
+  )
+}
+
+export default App
