@@ -9,7 +9,9 @@ Free to use, modify, and redistribute under the [MIT License](LICENSE). Source c
 [![React](https://img.shields.io/badge/React-19-149eca?logo=react&logoColor=white)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-7-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Supabase](https://img.shields.io/badge/Supabase-Auth%20%2B%20Postgres-3fcf8e?logo=supabase&logoColor=white)](https://supabase.com/)
-[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+<p align="center">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-green.svg"></a>
+</p>
 
 ## How It Works
 
@@ -19,66 +21,89 @@ Free to use, modify, and redistribute under the [MIT License](LICENSE). Source c
 4. Messages are encrypted and signed in the browser. Image files are encrypted before upload to a private Storage bucket.
 5. Manage theme, notifications, blocked users, devices, and conversation history from the app.
 
-Share a direct-chat link in the form `https://your-domain.example/ccq42t7rpzea`. Opening it after sign-in pre-fills the request composer; the sender chooses and confirms the first message before sending.
+Share a direct-chat link such as `https://sloppychat.vercel.app/ccq42t7rpzea`. After sign-in, it opens a prefilled request composer; the sender chooses the first message and confirms before sending.
 
 ```mermaid
 flowchart LR
-  A[Your browser] -->|Encrypt and sign| B[Supabase Auth]
-  A -->|Ciphertext and routing| C[(Postgres with RLS)]
-  A -->|Encrypted image bytes| D[Private Storage]
-  C -->|Ciphertext| E[Other trusted browser]
-  D -->|Encrypted bytes| E
-  E -->|Verify and decrypt locally| F[Readable message]
+  A[Sender's browser<br/>encrypt + sign] -->|ciphertext, routing data| C[(Postgres + RLS)]
+  A -->|encrypted image bytes| D[(Private Storage)]
+  A -. session .-> B[Supabase Auth]
+  C -->|ciphertext| E[Recipient's browser]
+  D -->|encrypted bytes| E
+  E -->|verify + decrypt locally| F[Readable message]
 ```
 
-## Requirements
+## Quick start
 
-- Node.js 22.12 or newer and npm.
-- A Supabase project with Auth, Postgres, Realtime, and Storage enabled.
-- Email confirmation disabled for password-only registration. Handles map to synthetic `@auth.sloppy.chat` aliases; these are not real email addresses.
+### Requirements
 
-## Local Development
+- Node.js 22.12 or newer, and npm
+- A Supabase project with Auth, Postgres, Realtime, and Storage enabled
+- Email confirmation **disabled** in Supabase Auth. Handles map to synthetic `@auth.sloppy.chat` aliases, which are not real addresses.
+
+### 1. Install
 
 ```sh
 npm install
+```
+
+### 2. Configure
+
+Set these in your local environment (for example `.env.local`) or your hosting provider:
+
+| Variable | Value |
+| --- | --- |
+| `VITE_SUPABASE_URL` | Your Supabase project URL |
+| `VITE_SUPABASE_PUBLISHABLE_KEY` | The publishable/anon key |
+
+> [!WARNING]
+> Only the publishable/anon key belongs in browser configuration. Never put a service-role key in a `VITE_` variable.
+
+For an existing Sloppy deployment, run `database/005_display_names.sql` once in the Supabase SQL Editor. It backfills current profiles and adds the secure preferred-name update function. Refresh the PostgREST schema if prompted. The original database bootstrap files are not included in this repository; the app requires the existing Sloppy schema and RLS policies.
+
+### 4. Run
+
+```sh
 npm run dev
 ```
 
-Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` in your local environment or hosting provider. Use only the Supabase publishable/anon key in browser configuration. Never use a service-role key in a `VITE_` variable.
+## Scripts
 
-For an existing deployment, run `database/005_display_names.sql` once in the Supabase SQL Editor. It adds preferred names to profiles and creates the owner-checked RPC used by Settings. Refresh the PostgREST schema after execution if prompted.
+| Command | Description |
+| --- | --- |
+| `npm run dev` | Start the dev server |
+| `npm test` | Run tests |
+| `npm run lint` | Lint |
+| `npm run build` | Production build into `dist/` |
 
-The app also requires the existing Sloppy Supabase schema, Auth settings, Realtime publication, and private encrypted-image bucket. This repository does not include the original database bootstrap files.
+## Usage notes
 
-## Security Notes
+**Settings:** system/light/dark appearance, password changes, notification preferences, blocked users, trusted devices, and message-request approvals.
 
-- Message text and attachment keys are encrypted and signed in the browser. Supabase stores ciphertext, encrypted image blobs, and the metadata needed to route conversations.
-- Conversation membership, blocking, device approval, and Storage access are guarded by RLS and database functions. Apply all migrations before exposing the app.
-- Browser notifications contain no message text and are opt-in. The preference is stored per browser. The app does not implement background push.
-- A compromised browser, malicious browser extension, or injected script can access plaintext while Sloppy is open. End-to-end encryption does not protect a compromised client.
-- The local signing key is held in the browser's IndexedDB vault. Losing all approved devices can make the account's existing encrypted history inaccessible; there is no email recovery path.
-- Conversation participants, timestamps, message sizes, and routing metadata are visible to the Supabase project. Blocking prevents app-level access but cannot retract data already copied by another participant.
-- Review Supabase Auth settings, database policies, Edge Function secrets, and deployment logs before publishing a project.
+**Conversation actions:** local renaming, hiding a conversation from your list, clearing your visible history, blocking participants, and deleting a direct conversation for both participants. A single member cannot delete group history for everyone.
 
-## Account and Conversation Controls
+**Images:** up to 2 MB per original file. Accepted formats are PNG, JPEG, WebP, GIF, and AVIF. SVG is rejected. Bytes are decrypted only in the browser.
 
-Settings include system/light/dark appearance, password changes, browser-notification preferences, blocked-user management, and trusted-device/message-request approvals.
+## Security model
 
-Conversation actions include local renaming, hiding a conversation from your list, clearing your visible history, blocking participants, and deleting a direct conversation for both participants. Group history cannot be deleted for everyone by a single member.
+### What is protected
 
-Images are limited to 2 MB per original file. Only PNG, JPEG, WebP, GIF, and AVIF are accepted; SVG is rejected. Image bytes are encrypted before upload and decrypted only in the browser.
+- Message text and attachment keys are encrypted and signed in the browser. Supabase stores ciphertext, encrypted image blobs, and the metadata needed for routing.
+- Conversation membership, blocking, device approval, and Storage access are enforced by RLS and database functions.
+- Notifications are opt-in, stored per browser, and contain no message text. There is no background push.
 
-## Checks
+### What is not
 
-```sh
-npm test
-npm run lint
-npm run build
-```
+- **Compromised clients.** A compromised browser, malicious extension, or injected script can read plaintext while Sloppy is open. End-to-end encryption does not cover this.
+- **No account recovery.** If you lose all approved devices, existing encrypted history can become inaccessible. There is no email recovery path.
+- **Visible metadata.** Participants, timestamps, message sizes, and routing data are visible to the Supabase project.
+- **Copied data.** Blocking restricts access in the app but cannot retract data another participant already copied.
+
+Before publishing a project, review Supabase Auth settings, database policies, public configuration, and deployment logs.
 
 ## Deployment
 
-Build with `npm run build` and publish the generated `dist/` directory to a static host. Configure `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` in the host's build environment. Configure the host to serve `index.html` for a single 12-character handle path so `/ccq42t7rpzea` reaches the client router.
+Build with `npm run build` and publish `dist/` to a static host. Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` in the host's build environment. Configure the host to serve `index.html` for a single 12-character handle path. The included `robots.txt` and `sitemap.xml` are copied into `dist/`.
 
 ## License
 
