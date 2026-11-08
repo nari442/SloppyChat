@@ -979,11 +979,11 @@ function Workspace({
             <h2 className="text-sm font-semibold text-md3-onSurfaceVariant">Conversations</h2>
             <button
               aria-label="New conversation"
-              className="grid h-12 w-12 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer shadow-sm transition hover:scale-[1.03]"
+              className="grid h-10 w-10 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer shadow-sm transition hover:scale-[1.03]"
               onClick={() => setNewChatOpen(true)}
               type="button"
             >
-              <Plus size={23} />
+              <Plus size={19} />
             </button>
           </div>
           <div className="px-4 pb-3">

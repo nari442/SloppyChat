@@ -21,4 +21,4 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-005_display_names.sql
+/database/
