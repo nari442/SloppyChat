@@ -104,6 +104,9 @@ function loadConversationNicknames(userId: string): { values: Record<string, str
 
 function workspaceErrorMessage(reason: unknown): string {
   const message = messageFromError(reason)
+  if (/ensure_my_profile.*(schema cache|function|does not exist)|(?:schema cache|function|does not exist).*ensure_my_profile/i.test(message)) {
+    return 'This Supabase project is missing the profile repair function. Run database/007_profile_self_repair.sql in the Supabase SQL Editor, then refresh the page.'
+  }
   if (/conversation_preferences.*(schema cache|does not exist)|(?:schema cache|does not exist).*conversation_preferences/i.test(message)) {
     return 'The Sloppy settings migration is missing. In the Supabase SQL Editor, run supabase/migrations/202611080003_settings_conversation_media.sql, then run NOTIFY pgrst, \'reload schema\'; and refresh this page. This migration preserves existing accounts and messages.'
   }
@@ -530,16 +533,14 @@ function Workspace({
     async function prepareWorkspace() {
       setLoading(true)
       try {
-        const { data, error: profileError } = await client
-          .from('profiles')
-          .select('username, display_name')
-          .eq('id', userId)
-          .single()
+        const { data, error: profileError } = await client.rpc('ensure_my_profile')
         if (profileError) {
-          throw new Error(profileError.message)
+          throw new Error(workspaceErrorMessage(profileError))
         }
-        const handle = (data as { username: string }).username
-        const preferredName = (data as { display_name?: string | null }).display_name ?? handle
+        const profile = ((data ?? []) as Array<{ username: string; display_name: string }>)[0]
+        if (!profile) throw new Error('Your Sloppy profile could not be created or loaded.')
+        const handle = profile.username
+        const preferredName = profile.display_name || handle
         const nextDeviceState = await activateOrRequestDevice(client, userId, handle)
         if (!active) {
           return

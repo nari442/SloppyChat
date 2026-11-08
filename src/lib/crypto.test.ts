@@ -55,6 +55,8 @@ describe('username authentication helpers', () => {
   it('extracts one valid handle from a deep link path', () => {
     expect(recipientHandleFromPath('/ccq42t7rpzea')).toBe('ccq42t7rpzea')
     expect(recipientHandleFromPath('/CCQ42T7RPZEA/')).toBe('ccq42t7rpzea')
+    expect(recipientHandleFromPath('/@ccq42t7rpzea')).toBe('ccq42t7rpzea')
+    expect(recipientHandleFromPath('/@CCQ42T7RPZEA/')).toBe('ccq42t7rpzea')
   })
 
   it('rejects non-handle and multi-segment paths', () => {

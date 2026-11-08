@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/:handle([A-Za-z2-7]{12})",
+      "destination": "/"
+    },
+    {
+      "source": "/@:handle([A-Za-z2-7]{12})",
+      "destination": "/"
+    }
+  ]
+}

@@ -62,7 +62,7 @@ Set these in your local environment (for example `.env.local`) or your hosting p
 
 The app requires the existing Sloppy schema and RLS policies. The original bootstrap files are not included in this repository.
 
-For an existing Sloppy deployment, run `database/005_display_names.sql` once in the Supabase SQL Editor. It backfills current profiles and adds the secure preferred-name update function. Refresh the PostgREST schema if prompted.
+For an existing Sloppy deployment, run `database/005_display_names.sql`, `database/006_rate_limits.sql`, and `database/007_profile_self_repair.sql` once each in the Supabase SQL Editor. Migration 007 also repairs a missing profile row for the authenticated account from its validated signup handle metadata. Refresh the PostgREST schema if prompted.
 
 ### 4. Run
 

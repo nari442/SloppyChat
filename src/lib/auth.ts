@@ -24,6 +24,7 @@ export function recipientHandleFromPath(pathname: string): string | null {
   } catch {
     return null
   }
+  if (candidate.startsWith('@')) candidate = candidate.slice(1)
   return isValidUsername(candidate) ? candidate : null
 }
 
