@@ -1,7 +1,4 @@
-<h1>
-  <img src="https://raw.githubusercontent.com/nari442/SloppyChat/main/src/assets/sloppychat.svg" alt="Sloppy Chat logo" height="40" align="absmiddle">
-  Sloppy Chat
-</h1>
+# Sloppy Chat
 
 Sloppy is an end-to-end encrypted chat platform. Messages and images are encrypted in your browser with AES-256-GCM. Message keys are wrapped using ECDH P-256 and HKDF-SHA-256, and messages are signed with ECDSA P-256. Supabase provides account sessions, encrypted message routing, trusted-device approvals, and private storage for encrypted images.
 
