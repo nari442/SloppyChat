@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { Bell, Check, KeyRound, LoaderCircle, Monitor, Moon, Shield, Sun, UserRound, X } from 'lucide-react'
+import { Check, KeyRound, LoaderCircle, Monitor, Moon, Shield, Sun, UserRound, X } from 'lucide-react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { authEmailForUsername, validatePassword } from '../lib/auth'
 import { loadBlockedUsers, unblockUser, type BlockedUser } from '../lib/conversation-service'

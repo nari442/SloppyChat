@@ -3,7 +3,6 @@ import {
   ArrowLeft,
   Archive,
   Ban,
-  BellOff,
   Check,
   ChevronDown,
   Copy,
@@ -125,30 +124,6 @@ function loadConversationNicknames(userId: string): { values: Record<string, str
     return { values: Object.fromEntries(validEntries), error: '' }
   } catch (reason) {
     return { values: {}, error: `Could not load local conversation nicknames: ${messageFromError(reason)}` }
-  }
-}
-
-function loadUnreadCounts(userId: string): Record<string, number> {
-  try {
-    const saved = window.localStorage.getItem(`sloppy-unread:${userId}`)
-    if (!saved) return {}
-    const parsed: unknown = JSON.parse(saved)
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
-    return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, number] => (
-      typeof entry[1] === 'number' && Number.isFinite(entry[1]) && entry[1] > 0
-    )))
-  } catch {
-    return {}
-  }
-}
-
-function loadMutedConversationIds(userId: string): string[] {
-  try {
-    const saved = window.localStorage.getItem(`sloppy-muted-conversations:${userId}`)
-    const parsed: unknown = saved ? JSON.parse(saved) : []
-    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []
-  } catch {
-    return []
   }
 }
 
