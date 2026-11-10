@@ -1,11 +1,17 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Bell, Check, KeyRound, LoaderCircle, Monitor, Moon, Shield, Sun, UserRound, X } from 'lucide-react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { authEmailForUsername, validatePassword } from '../lib/auth'
 import { loadBlockedUsers, unblockUser, type BlockedUser } from '../lib/conversation-service'
 import { Handle } from './Handle'
+import { Alert, AlertDescription } from './ui/alert'
+import { Button } from './ui/button'
+import { Dialog, DialogContent } from './ui/dialog'
+import { Input } from './ui/input'
+import { accentColorPresets, accentForeground, type AccentColor } from '../lib/appearance'
 
 type Theme = 'system' | 'light' | 'dark'
+type SettingsSection = 'appearance' | 'profile' | 'security' | 'privacy'
 
 export function SettingsDialog({
   client,
@@ -15,6 +21,8 @@ export function SettingsDialog({
   onOpenDevices,
   onOpenRequests,
   onThemeChange,
+  accentColor,
+  onAccentColorChange,
   onDisplayNameChange,
   theme,
   displayName,
@@ -27,19 +35,39 @@ export function SettingsDialog({
   onOpenDevices: () => void
   onOpenRequests: () => void
   onThemeChange: (theme: Theme) => void
+  accentColor: string
+  onAccentColorChange: (color: AccentColor) => void
   onDisplayNameChange: (displayName: string) => void
   theme: Theme
   displayName: string
   username: string
 }) {
+  const [open, setOpen] = useState(true)
+  const closeTimer = useRef<number | null>(null)
+  const isClosing = useRef(false)
+  const requestClose = useCallback((afterClose?: () => void) => {
+    if (isClosing.current) return
+    isClosing.current = true
+    setOpen(false)
+    const delay = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 210
+    closeTimer.current = window.setTimeout(() => {
+      onClose()
+      afterClose?.()
+    }, delay)
+  }, [onClose])
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
-  const [preferredName, setPreferredName] = useState(displayName)
+  const [activeSection, setActiveSection] = useState<SettingsSection>('appearance')
+  const [displayNameDraft, setDisplayNameDraft] = useState(displayName)
   const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([])
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+
+  useEffect(() => () => {
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current)
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -51,11 +79,11 @@ export function SettingsDialog({
     return () => { active = false }
   }, [client])
 
-  async function savePreferredName(event: FormEvent<HTMLFormElement>) {
+  async function saveDisplayName(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const nextName = preferredName.trim()
+    const nextName = displayNameDraft.trim()
     if (!nextName || nextName.length > 40) {
-      setError('Use a preferred name between 1 and 40 characters.')
+      setError('Use a display name between 1 and 40 characters.')
       return
     }
     setError('')
@@ -66,11 +94,11 @@ export function SettingsDialog({
         requested_display_name: nextName
       })
       if (updateError) throw new Error(updateError.message)
-      setPreferredName(nextName)
+      setDisplayNameDraft(nextName)
       onDisplayNameChange(nextName)
-      setNotice('Preferred name updated.')
+      setNotice('Display name updated.')
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not update your preferred name.')
+      setError(reason instanceof Error ? reason.message : 'Could not update your display name.')
     } finally {
       setBusy('')
     }
@@ -123,69 +151,149 @@ export function SettingsDialog({
   }
 
   return (
-    <div className="dialog-backdrop fixed inset-0 z-50 grid place-items-center bg-md3-onBackground/35 p-4 backdrop-blur-sm" onMouseDown={(event) => {
-      if (event.target === event.currentTarget) onClose()
-    }}>
-      <section aria-labelledby="settings-title" aria-modal="true" className="dialog-panel settings-dialog-panel max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-3xl bg-md3-surface p-5 shadow-lift sm:p-7" role="dialog">
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!nextOpen) requestClose() }}>
+      <DialogContent
+        aria-labelledby="settings-title"
+        className="settings-dialog-panel flex h-[min(44rem,92vh)] max-w-3xl flex-col overflow-hidden p-5 sm:p-7"
+        showCloseButton={false}
+      >
         <header className="flex items-start justify-between gap-4">
           <div>
-            <div className="grid h-11 w-11 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><Shield size={20} /></div>
+            <div className="grid h-11 w-11 place-items-center rounded-lg bg-accent text-accent-foreground"><Shield size={20} /></div>
             <h2 className="mt-3 text-xl font-semibold" id="settings-title">Settings</h2>
-            <p className="mt-1 text-sm text-md3-onSurfaceVariant">Account, privacy, and appearance</p>
+            <p className="mt-1 text-sm text-muted-foreground">Account, privacy, and appearance</p>
           </div>
-          <button aria-label="Close settings" className="grid h-10 w-10 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+          <Button aria-label="Close settings" className="grid h-10 w-10 place-items-center rounded-full text-muted-foreground hover:bg-secondary" onClick={() => requestClose()} type="button"><X size={18} /></Button>
         </header>
 
-        <section className="mt-6 border-t border-md3-outlineVariant/60 pt-5">
-          <h3 className="flex items-center gap-2 text-sm font-semibold"><Sun size={16} /> Appearance</h3>
-          <div aria-label="Color theme" className="mt-3 grid grid-cols-3 gap-2" role="group">
-            <button aria-pressed={theme === 'system'} className={`flex items-center justify-center gap-2 rounded-2xl border px-2 py-3 text-sm font-semibold ${theme === 'system' ? 'border-md3-primary bg-md3-primaryContainer text-md3-onPrimaryContainer' : 'border-md3-outlineVariant text-md3-onSurfaceVariant'}`} onClick={() => onThemeChange('system')} type="button"><Monitor size={16} /> System</button>
-            <button aria-pressed={theme === 'light'} className={`flex items-center justify-center gap-2 rounded-2xl border px-2 py-3 text-sm font-semibold ${theme === 'light' ? 'border-md3-primary bg-md3-primaryContainer text-md3-onPrimaryContainer' : 'border-md3-outlineVariant text-md3-onSurfaceVariant'}`} onClick={() => onThemeChange('light')} type="button"><Sun size={16} /> Light</button>
-            <button aria-pressed={theme === 'dark'} className={`flex items-center justify-center gap-2 rounded-2xl border px-2 py-3 text-sm font-semibold ${theme === 'dark' ? 'border-md3-primary bg-md3-primaryContainer text-md3-onPrimaryContainer' : 'border-md3-outlineVariant text-md3-onSurfaceVariant'}`} onClick={() => onThemeChange('dark')} type="button"><Moon size={16} /> Dark</button>
+        <div className="mt-6 grid min-h-0 flex-1 gap-4 sm:grid-cols-[10rem_minmax(0,1fr)]">
+          <nav aria-label="Settings categories" className="grid grid-cols-2 gap-2 sm:flex sm:flex-col">
+            {([
+              ['appearance', 'Appearance', Sun],
+              ['profile', 'Display Name', UserRound],
+              ['security', 'Security', KeyRound],
+              ['privacy', 'Privacy & access', Shield]
+            ] as const).map(([section, label, Icon]) => (
+              <Button
+                aria-current={activeSection === section ? 'page' : undefined}
+                className={`flex min-w-0 items-center justify-start gap-2 rounded-lg px-3 py-2.5 text-sm font-semibold sm:w-full ${activeSection === section ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-muted'}`}
+                key={section}
+                onClick={() => {
+                  setActiveSection(section)
+                  setError('')
+                  setNotice('')
+                }}
+                type="button"
+              >
+                <Icon size={16} />
+                {label}
+              </Button>
+            ))}
+          </nav>
+
+          <div
+            aria-labelledby={`settings-heading-${activeSection}`}
+            className="min-h-0 overflow-y-auto rounded-xl border border-border/60 bg-background p-4 sm:p-5"
+          >
+            {activeSection === 'appearance' && (
+              <section>
+                <h3 className="text-base font-semibold" id="settings-heading-appearance">Appearance</h3>
+                <p className="mt-1 text-sm text-muted-foreground">Choose a theme and accent color for the interface.</p>
+                <div aria-label="Color theme" className="mt-4 grid grid-cols-3 gap-2" role="group">
+                  <Button aria-pressed={theme === 'system'} className={`flex items-center justify-center gap-2 rounded-lg border px-2 py-3 text-sm font-semibold ${theme === 'system' ? 'border-primary bg-accent text-accent-foreground' : 'border-border text-muted-foreground'}`} onClick={() => onThemeChange('system')} type="button" variant="outline"><Monitor size={16} /> System</Button>
+                  <Button aria-pressed={theme === 'light'} className={`flex items-center justify-center gap-2 rounded-lg border px-2 py-3 text-sm font-semibold ${theme === 'light' ? 'border-primary bg-accent text-accent-foreground' : 'border-border text-muted-foreground'}`} onClick={() => onThemeChange('light')} type="button" variant="outline"><Sun size={16} /> Light</Button>
+                  <Button aria-pressed={theme === 'dark'} className={`flex items-center justify-center gap-2 rounded-lg border px-2 py-3 text-sm font-semibold ${theme === 'dark' ? 'border-primary bg-accent text-accent-foreground' : 'border-border text-muted-foreground'}`} onClick={() => onThemeChange('dark')} type="button" variant="outline"><Moon size={16} /> Dark</Button>
+                </div>
+                <div className="mt-4 rounded-lg bg-muted p-3">
+                  <p className="text-sm font-medium">Accent color</p>
+                  <p className="mt-1 text-xs text-muted-foreground">Choose a color for your interface and logo.</p>
+                  <div aria-label="Accent color" className="mt-3 flex flex-wrap gap-2" role="radiogroup">
+                    {accentColorPresets.map((preset) => (
+                      <Button
+                        aria-checked={accentColor === preset.value}
+                        aria-label={preset.name}
+                        className={`flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold ${accentColor === preset.value ? 'border-primary bg-background text-foreground' : 'border-border bg-background text-muted-foreground'}`}
+                        key={preset.value}
+                        onClick={() => onAccentColorChange(preset.value)}
+                        role="radio"
+                        title={preset.name}
+                        type="button"
+                        variant="outline"
+                      >
+                        <span className="grid h-4 w-4 place-items-center rounded-full" style={{ backgroundColor: preset.value }}>
+                          {accentColor === preset.value && <Check aria-hidden="true" color={accentForeground(preset.value)} size={12} strokeWidth={3} />}
+                        </span>
+                        {preset.name}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {activeSection === 'profile' && (
+              <section>
+                <h3 className="text-base font-semibold" id="settings-heading-profile">Display Name</h3>
+                <p className="mt-1 text-sm text-muted-foreground">This is the name your friends see. Your generated handle stays your login and friend link.</p>
+                <form className="mt-4 flex flex-col gap-2 sm:flex-row" onSubmit={(event) => void saveDisplayName(event)}>
+                  <Input autoComplete="name" aria-label="Display Name" className="min-w-0 flex-1 rounded-lg border border-border bg-background px-4 py-3 text-sm" maxLength={40} onChange={(event) => setDisplayNameDraft(event.target.value)} value={displayNameDraft} />
+                  <Button className="flex items-center justify-center gap-2 rounded-full bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground disabled:opacity-60" disabled={busy === 'display-name'} type="submit">{busy === 'display-name' ? <LoaderCircle className="animate-spin" size={16} /> : <Check size={16} />} Save name</Button>
+                </form>
+              </section>
+            )}
+
+            {activeSection === 'security' && (
+              <section>
+                <h3 className="text-base font-semibold" id="settings-heading-security">Password</h3>
+                <p className="mt-1 text-sm text-muted-foreground">Update the password used to unlock your account.</p>
+                <form className="mt-4 grid gap-3 sm:grid-cols-2" onSubmit={(event) => void changePassword(event)}>
+                  <label className="text-sm font-medium sm:col-span-2">Current password<Input autoComplete="current-password" className="mt-2 w-full rounded-lg border border-border bg-background px-4 py-3" onChange={(event) => setCurrentPassword(event.target.value)} required type="password" value={currentPassword} /></label>
+                  <label className="text-sm font-medium">New password<Input autoComplete="new-password" className="mt-2 w-full rounded-lg border border-border bg-background px-4 py-3" maxLength={72} onChange={(event) => setNewPassword(event.target.value)} required type="password" value={newPassword} /></label>
+                  <label className="text-sm font-medium">Confirm new password<Input autoComplete="new-password" className="mt-2 w-full rounded-lg border border-border bg-background px-4 py-3" maxLength={72} onChange={(event) => setConfirmPassword(event.target.value)} required type="password" value={confirmPassword} /></label>
+                  <Button className="flex items-center justify-center gap-2 rounded-full bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground disabled:opacity-60 sm:col-span-2" disabled={busy === 'password'} type="submit">{busy === 'password' ? <LoaderCircle className="animate-spin" size={16} /> : <Check size={16} />} Update password</Button>
+                </form>
+              </section>
+            )}
+
+            {activeSection === 'privacy' && (
+              <div className="space-y-6">
+                <section>
+                  <h3 className="text-base font-semibold" id="settings-heading-privacy">Notifications</h3>
+                  <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-lg bg-muted p-4">
+                    <Input checked={notificationsEnabled} className="mt-1 h-4 min-h-0 w-4 accent-primary" onChange={(event) => onNotificationsChange(event.target.checked)} type="checkbox" />
+                    <span><span className="block text-sm font-medium">Notifications</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">Popups and background-tab browser alerts. Message text is never shown.</span></span>
+                  </label>
+                </section>
+
+                <section className="border-t border-border/60 pt-5">
+                  <h3 className="text-sm font-semibold">Approvals and access</h3>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <Button className="rounded-lg bg-muted px-3 py-3 text-sm font-semibold" onClick={() => requestClose(onOpenRequests)} type="button">Message requests</Button>
+                    <Button className="rounded-lg bg-muted px-3 py-3 text-sm font-semibold" onClick={() => requestClose(onOpenDevices)} type="button">Trusted devices</Button>
+                  </div>
+                </section>
+
+                <section className="border-t border-border/60 pt-5">
+                  <h3 className="text-sm font-semibold">Blocked users</h3>
+                  {blockedUsers.length === 0 ? <p className="mt-2 text-sm text-muted-foreground">No blocked users.</p> : <ul className="mt-2 space-y-2">{blockedUsers.map((user) => <li className="flex items-center gap-3 rounded-lg bg-muted px-4 py-3" key={user.user_id}><span className="min-w-0 flex-1 truncate text-sm"><Handle value={user.username} /></span><Button className="text-xs font-semibold text-primary" disabled={Boolean(busy)} onClick={() => void removeBlock(user)} type="button">{busy === user.user_id ? 'Unblocking' : 'Unblock'}</Button></li>)}</ul>}
+                </section>
+              </div>
+            )}
+
+            {(error || notice) && (
+              <Alert
+                className={error ? 'mt-4' : 'mt-4 border-primary/30 bg-primary/10 text-primary'}
+                role={error ? 'alert' : 'status'}
+                variant={error ? 'destructive' : 'default'}
+              >
+                <AlertDescription className={error ? 'text-destructive' : 'text-primary'}>
+                  {error || notice}
+                </AlertDescription>
+              </Alert>
+            )}
           </div>
-        </section>
-
-        <section className="mt-5 border-t border-md3-outlineVariant/60 pt-5">
-          <h3 className="flex items-center gap-2 text-sm font-semibold"><UserRound size={16} /> Preferred name</h3>
-          <form className="mt-3 flex flex-col gap-2 sm:flex-row" onSubmit={(event) => void savePreferredName(event)}>
-            <input autoComplete="name" className="min-w-0 flex-1 rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 text-sm" maxLength={40} onChange={(event) => setPreferredName(event.target.value)} value={preferredName} />
-            <button className="flex items-center justify-center gap-2 rounded-full bg-md3-primary px-4 py-3 text-sm font-semibold text-md3-onPrimary disabled:opacity-60" disabled={busy === 'display-name'} type="submit">{busy === 'display-name' ? <LoaderCircle className="animate-spin" size={16} /> : <Check size={16} />} Save name</button>
-          </form>
-          <p className="mt-2 text-xs leading-5 text-md3-onSurfaceVariant">This is the name contacts see. Your generated handle remains your login and contact link.</p>
-        </section>
-
-        <section className="mt-5 border-t border-md3-outlineVariant/60 pt-5">
-          <h3 className="flex items-center gap-2 text-sm font-semibold"><Bell size={16} /> Notifications</h3>
-          <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-2xl bg-md3-surfaceContainerLow p-4">
-            <input checked={notificationsEnabled} className="mt-1 h-4 w-4 accent-[rgb(var(--md3-primary))]" onChange={(event) => onNotificationsChange(event.target.checked)} type="checkbox" />
-            <span><span className="block text-sm font-medium">Notifications</span><span className="mt-1 block text-xs leading-5 text-md3-onSurfaceVariant">Popups and background-tab browser alerts. Message text is never shown.</span></span>
-          </label>
-        </section>
-
-        <section className="mt-5 border-t border-md3-outlineVariant/60 pt-5">
-          <h3 className="flex items-center gap-2 text-sm font-semibold"><KeyRound size={16} /> Change password</h3>
-          <form className="mt-3 grid gap-3 sm:grid-cols-2" onSubmit={(event) => void changePassword(event)}>
-            <label className="text-sm font-medium sm:col-span-2">Current password<input autoComplete="current-password" className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3" onChange={(event) => setCurrentPassword(event.target.value)} required type="password" value={currentPassword} /></label>
-            <label className="text-sm font-medium">New password<input autoComplete="new-password" className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3" maxLength={72} onChange={(event) => setNewPassword(event.target.value)} required type="password" value={newPassword} /></label>
-            <label className="text-sm font-medium">Confirm new password<input autoComplete="new-password" className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3" maxLength={72} onChange={(event) => setConfirmPassword(event.target.value)} required type="password" value={confirmPassword} /></label>
-            <button className="flex items-center justify-center gap-2 rounded-full bg-md3-primary px-4 py-3 text-sm font-semibold text-md3-onPrimary disabled:opacity-60 sm:col-span-2" disabled={busy === 'password'} type="submit">{busy === 'password' ? <LoaderCircle className="animate-spin" size={16} /> : <Check size={16} />} Update password</button>
-          </form>
-        </section>
-
-        <section className="mt-5 border-t border-md3-outlineVariant/60 pt-5">
-          <h3 className="text-sm font-semibold">Approvals and access</h3>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <button className="rounded-2xl bg-md3-surfaceContainerLow px-3 py-3 text-sm font-semibold" onClick={onOpenRequests} type="button">Message requests</button>
-            <button className="rounded-2xl bg-md3-surfaceContainerLow px-3 py-3 text-sm font-semibold" onClick={onOpenDevices} type="button">Trusted devices</button>
-          </div>
-        </section>
-
-        <section className="mt-5 border-t border-md3-outlineVariant/60 pt-5">
-          <h3 className="text-sm font-semibold">Blocked users</h3>
-          {blockedUsers.length === 0 ? <p className="mt-2 text-sm text-md3-onSurfaceVariant">No blocked users.</p> : <ul className="mt-2 space-y-2">{blockedUsers.map((user) => <li className="flex items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3" key={user.user_id}><span className="min-w-0 flex-1 truncate text-sm"><Handle value={user.username} /></span><button className="text-xs font-semibold text-md3-primary" disabled={Boolean(busy)} onClick={() => void removeBlock(user)} type="button">{busy === user.user_id ? 'Unblocking' : 'Unblock'}</button></li>)}</ul>}
-        </section>
-        {(error || notice) && <p className={`mt-4 rounded-2xl px-4 py-3 text-sm ${error ? 'bg-md3-errorContainer text-md3-onErrorContainer' : 'bg-md3-primaryContainer text-md3-onPrimaryContainer'}`} role={error ? 'alert' : 'status'}>{error || notice}</p>}
-      </section>
-    </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }

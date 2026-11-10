@@ -53,10 +53,9 @@ export interface ChatMessage {
   key_envelopes: EncryptedMessage['keyEnvelopes']
   created_at: string
   text: string | null
-  untrusted: boolean
 }
 
-type StoredMessage = Omit<ChatMessage, 'text' | 'untrusted'>
+type StoredMessage = Omit<ChatMessage, 'text'>
 
 export async function loadConversations(client: SupabaseClient): Promise<Conversation[]> {
   const { data, error } = await client
@@ -140,6 +139,9 @@ export async function sendMessageRequest(
     throw new Error(`Could not prepare the message request: ${recipientError.message}`)
   }
   const recipientDevices = ((recipientData ?? []) as StoredRequestDevice[]).map(mapRequestDevice)
+  if (recipientDevices.length === 0) {
+    throw new Error('That user has no trusted devices yet. Ask them to finish device setup, then send the request again.')
+  }
   const { data: ownData, error: ownError } = await client.rpc('get_my_devices')
   if (ownError) {
     throw new Error(`Could not load this account's trusted devices: ${ownError.message}`)
@@ -320,9 +322,13 @@ export async function loadMessages(
     throw new Error(`Could not load encrypted messages: ${error.message}`)
   }
   const rows = ((data ?? []) as StoredMessage[]).reverse()
+  const fingerprintCache = new Map<JsonWebKey, Promise<string>>()
   const messages: ChatMessage[] = []
-  for (const row of rows) {
-    messages.push(await decodeStoredMessage(conversationId, vault, row, devices))
+  for (let index = 0; index < rows.length; index += 16) {
+    const batch = rows.slice(index, index + 16)
+    messages.push(...await Promise.all(batch.map((row) => (
+      decodeStoredMessage(conversationId, vault, row, devices, fingerprintCache)
+    ))))
   }
   return messages
 }
@@ -359,11 +365,6 @@ export async function sendMessage(
       if (await identityFingerprint(device.identitySigningPublic) !== ownFingerprint) {
         throw new Error('The account identity key for this device does not match the local identity.')
       }
-      continue
-    }
-    const fingerprint = await identityFingerprint(device.identitySigningPublic)
-    if (vault.peerPins?.[device.userId] !== fingerprint) {
-      throw new Error('Verify this contact’s safety code before sending messages.')
     }
   }
   const encrypted = await encryptMessage(
@@ -386,7 +387,7 @@ export async function sendMessage(
   if (error) {
     throw new Error(`Could not send the encrypted message: ${error.message}`)
   }
-  return { ...(data as StoredMessage), text: plaintext, untrusted: false }
+  return { ...(data as StoredMessage), text: plaintext }
 }
 
 export async function decryptRealtimeMessage(
@@ -402,13 +403,22 @@ async function decodeStoredMessage(
   conversationId: string,
   vault: DeviceVault,
   row: StoredMessage,
-  devices: DevicePublicKey[]
+  devices: DevicePublicKey[],
+  fingerprintCache = new Map<JsonWebKey, Promise<string>>()
 ): Promise<ChatMessage> {
   const senderDevices = devices.filter((device) => device.userId === row.sender_id)
   if (senderDevices.length === 0) {
     throw new Error('The sender identity is missing from this conversation.')
   }
-  const identityFingerprints = await Promise.all(senderDevices.map((device) => identityFingerprint(device.identitySigningPublic)))
+  const getFingerprint = (publicKey: JsonWebKey) => {
+    let fingerprint = fingerprintCache.get(publicKey)
+    if (!fingerprint) {
+      fingerprint = identityFingerprint(publicKey)
+      fingerprintCache.set(publicKey, fingerprint)
+    }
+    return fingerprint
+  }
+  const identityFingerprints = await Promise.all(senderDevices.map((device) => getFingerprint(device.identitySigningPublic)))
   if (new Set(identityFingerprints).size !== 1) {
     throw new Error('The sender devices have conflicting identity keys.')
   }
@@ -426,12 +436,6 @@ async function decodeStoredMessage(
   if (!(await verifyMessageSignature(conversationId, encrypted, senderIdentityPublic))) {
     throw new Error('The message identity signature is invalid.')
   }
-  const expectedFingerprint = row.sender_id === vault.userId && vault.identityPublicKey
-    ? await identityFingerprint(vault.identityPublicKey)
-    : vault.peerPins?.[row.sender_id]
-  if (expectedFingerprint !== identityFingerprints[0]) {
-    return { ...row, text: null, untrusted: true }
-  }
   const text = await decryptMessage(
     conversationId,
     vault.deviceId,
@@ -439,7 +443,7 @@ async function decodeStoredMessage(
     encrypted,
     senderIdentityPublic
   )
-  return { ...row, text, untrusted: false }
+  return { ...row, text }
 }
 
 export type { StoredMessage }

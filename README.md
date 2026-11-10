@@ -12,11 +12,13 @@ Free to use, modify, and redistribute under the [MIT License](LICENSE). Source c
 [![Supabase](https://img.shields.io/badge/Supabase-Auth%20%2B%20Postgres-3fcf8e?logo=supabase&logoColor=white)](https://supabase.com/)
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+The React/Vite interface uses shadcn/ui with preset `b2BVC7TPM`.
+
 ## How it works
 
 1. Create an account with a generated 12-character handle, a strong password, and an optional preferred name. The preferred name defaults to the handle.
-2. Approve each new browser from an existing trusted device.
-3. Accept message requests before opening direct conversations, and verify safety codes before sending.
+2. Sign in and finish setup on at least one browser before receiving message requests. Approve each additional browser from an existing trusted device.
+3. Accept message requests before opening direct conversations. Safety-code comparison is optional and available to independently confirm contacts.
 4. Messages are encrypted and signed in the browser. Image files are encrypted before upload to a private Storage bucket.
 5. Manage theme, notifications, blocked users, devices, and conversation history from the app.
 

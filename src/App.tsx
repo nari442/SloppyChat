@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   ArrowLeft,
   Archive,
@@ -52,7 +52,13 @@ import { conversationMemberNames } from './lib/conversation-label'
 import { ConversationLabel } from './components/ConversationLabel'
 import { Handle } from './components/Handle'
 import { SettingsDialog } from './components/SettingsDialog'
-import { authEmailForUsername, generateUsername, getPasswordRequirements, isValidUsername, recipientHandleFromPath, registrationErrorMessage, validatePassword } from './lib/auth'
+import { Button } from './components/ui/button'
+import { Card } from './components/ui/card'
+import { Dialog, DialogContent } from './components/ui/dialog'
+import { Input } from './components/ui/input'
+import { Textarea } from './components/ui/textarea'
+import { authEmailForUsername, generateUsername, getPasswordRequirements, isValidUsername, registrationErrorMessage, validatePassword } from './lib/auth'
+import { appRouteFromPath, canonicalAppPath, pathForAppRoute, type AppRoute } from './lib/app-routes'
 import { identityFingerprint } from './lib/crypto'
 import {
   addGroupMembers,
@@ -74,14 +80,30 @@ import {
   type ImageAttachment
 } from './lib/image-attachment'
 import { createSupabaseClient } from './lib/supabase'
-import sloppyChatLogo from './assets/sloppychat.svg'
+import { accentForeground, darkAccentColor, normalizeAccentColor, type AccentColor } from './lib/appearance'
+import { brandIconForAccent } from './lib/brand-icons'
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
 const supabasePublishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || import.meta.env.VITE_SUPABASE_ANON_KEY
+const DialogCloseContext = createContext<((afterClose?: () => void) => void) | null>(null)
+
+function useDialogClose(onClose: () => void) {
+  const requestClose = useContext(DialogCloseContext)
+  return requestClose ?? ((afterClose?: () => void) => {
+    onClose()
+    afterClose?.()
+  })
+}
 
 type AuthMode = 'login' | 'register'
 type ThemePreference = 'system' | 'light' | 'dark'
 type ContactOption = { userId: string; username: string; displayName: string }
+type PeerIdentity = {
+  userId: string
+  username: string
+  fingerprint: string
+  status: 'verified' | 'unverified' | 'changed' | 'missing' | 'conflict'
+}
 
 function messageFromError(reason: unknown): string {
   return reason instanceof Error ? reason.message : 'Something went wrong. Please try again.'
@@ -156,7 +178,8 @@ const supabaseConfiguration = (() => {
 })()
 
 function App() {
-  const requestedHandle = recipientHandleFromPath(window.location.pathname)
+  const [route, setRoute] = useState<AppRoute>(() => appRouteFromPath(window.location.pathname))
+  const [accentColor, setAccentColor] = useState(() => normalizeAccentColor(window.localStorage.getItem('sloppy-accent-color')))
   const [theme, setTheme] = useState<ThemePreference>(() => {
     const saved = window.localStorage.getItem('sloppy-theme-preference')
     return saved === 'light' || saved === 'dark' ? saved : 'system'
@@ -166,6 +189,25 @@ function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [sessionLoading, setSessionLoading] = useState(true)
   const [sessionError, setSessionError] = useState('')
+
+  const navigateToRoute = useCallback((nextRoute: AppRoute, replace = false) => {
+    const path = pathForAppRoute(nextRoute)
+    if (window.location.pathname !== path) {
+      window.history[replace ? 'replaceState' : 'pushState']({}, '', path)
+    }
+    setRoute(nextRoute)
+  }, [])
+
+  useEffect(() => {
+    const canonicalPath = canonicalAppPath(window.location.pathname)
+    if (window.location.pathname !== canonicalPath) {
+      window.history.replaceState({}, '', canonicalPath)
+      setRoute(appRouteFromPath(canonicalPath))
+    }
+    const handlePopState = () => setRoute(appRouteFromPath(window.location.pathname))
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
 
   useEffect(() => {
     const colorScheme = window.matchMedia('(prefers-color-scheme: dark)')
@@ -182,6 +224,23 @@ function App() {
     }
     window.localStorage.setItem('sloppy-theme-preference', theme)
   }, [theme])
+
+  useEffect(() => {
+    const root = document.documentElement
+    root.style.setProperty('--brand-color', accentColor)
+    root.style.setProperty('--brand-foreground', accentForeground(accentColor))
+    const darkColor = darkAccentColor(accentColor)
+    root.style.setProperty('--brand-dark-color', darkColor)
+    root.style.setProperty('--brand-dark-foreground', accentForeground(darkColor))
+    const icon = brandIconForAccent(accentColor)
+    root.style.setProperty('--brand-icon', `url("${icon}")`)
+    window.localStorage.setItem('sloppy-accent-color', accentColor)
+    const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
+    if (favicon) favicon.href = icon
+    document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]').forEach((meta) => {
+      meta.content = accentColor
+    })
+  }, [accentColor])
 
   useEffect(() => {
     if (!client) {
@@ -225,7 +284,7 @@ function App() {
   } else if (!session) {
     screen = <AuthScreen client={client} />
   } else {
-    screen = <Workspace client={client} session={session} theme={theme} onThemeChange={setTheme} requestedHandle={requestedHandle} />
+    screen = <Workspace client={client} session={session} theme={theme} onThemeChange={setTheme} accentColor={accentColor} onAccentColorChange={setAccentColor} route={route} onNavigate={navigateToRoute} />
   }
 
   return <>{screen}</>
@@ -233,37 +292,66 @@ function App() {
 
 function SetupNotice({ error }: { error: string }) {
   return (
-    <main className="grid min-h-screen place-items-center bg-md3-background px-5 py-10">
-      <section className="w-full max-w-xl rounded-3xl bg-md3-surface p-8 shadow-lift sm:p-10">
+    <main className="grid min-h-screen place-items-center bg-background px-5 py-10">
+      <section className="w-full max-w-xl rounded-xl bg-card p-8 shadow-lift sm:p-10">
         <BrandMark />
-        <h1 className="mt-8 text-3xl font-semibold tracking-tight text-md3-onBackground">Connect your Supabase project</h1>
-        <p className="mt-3 leading-7 text-md3-onSurfaceVariant">
-          Add the project URL and public publishable key to a local <code className="rounded-lg bg-md3-surfaceContainer px-2 py-1 text-sm">.env</code> file.
+        <h1 className="mt-8 text-3xl font-semibold tracking-tight text-foreground">Connect your Supabase project</h1>
+        <p className="mt-3 leading-7 text-muted-foreground">
+          Add the project URL and public publishable key to a local <code className="rounded-lg bg-secondary px-2 py-1 text-sm">.env</code> file.
           Apply the SQL migration and disable email confirmations for password-only registration.
         </p>
-        <pre className="mt-6 overflow-x-auto rounded-2xl bg-[#17252b] p-5 text-sm leading-7 text-[#b2f1d3]"><code>VITE_SUPABASE_URL=https://your-project.supabase.co{'\n'}VITE_SUPABASE_PUBLISHABLE_KEY=your-public-publishable-key</code></pre>
-        <p className="mt-5 text-sm leading-6 text-md3-onSurfaceVariant">
+        <pre className="mt-6 overflow-x-auto rounded-lg bg-[#17252b] p-5 text-sm leading-7 text-[#b2f1d3]"><code>VITE_SUPABASE_URL=https://your-project.supabase.co{'\n'}VITE_SUPABASE_PUBLISHABLE_KEY=your-public-publishable-key</code></pre>
+        <p className="mt-5 text-sm leading-6 text-muted-foreground">
           Never use a Supabase service-role key in browser configuration. See the setup guide for auth and database steps.
         </p>
-        <p className="mt-3 text-xs text-md3-error" role="alert">{error}</p>
+        <p className="mt-3 text-xs text-destructive" role="alert">{error}</p>
       </section>
     </main>
+  )
+}
+
+function ErrorToast({ error, onDismiss }: { error: string; onDismiss: () => void }) {
+  const [toast, setToast] = useState({ source: error, message: error, visible: Boolean(error) })
+  if (error !== toast.source) {
+    setToast({
+      source: error,
+      message: error || toast.message,
+      visible: Boolean(error)
+    })
+  }
+
+  if (!toast.message) return null
+
+  return (
+    <div
+      className={`notice-toast fixed bottom-5 left-1/2 z-40 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive shadow-lift ${toast.visible ? '' : 'notice-toast-closed'}`}
+      onTransitionEnd={(event) => {
+        if (event.propertyName === 'opacity' && !toast.visible) {
+          setToast({ source: '', message: '', visible: false })
+        }
+      }}
+      role="alert"
+    >
+      <ShieldAlert className="shrink-0" size={17} />
+      <span>{toast.message}</span>
+      <Button aria-label="Dismiss error" className="shrink-0 rounded-full p-1 hover:bg-black/5" onClick={onDismiss} type="button"><X size={16} /></Button>
+    </div>
   )
 }
 
 function BrandMark() {
   return (
     <div className="brand-mark flex items-center gap-3">
-      <img className="h-12 w-12" src={sloppyChatLogo} alt="" />
-      <span className="text-xl font-semibold tracking-tight text-md3-onBackground">Sloppy</span>
+      <span aria-hidden="true" className="brand-mark-icon h-8 w-8 shrink-0" />
+      <span className="text-xl font-semibold tracking-tight text-foreground">Sloppy</span>
     </div>
   )
 }
 
 function LoadingScreen({ label }: { label: string }) {
   return (
-    <main className="grid min-h-screen place-items-center bg-md3-background text-md3-primary">
-      <div className="flex items-center gap-3 rounded-full bg-md3-surface px-6 py-4 shadow-lift">
+    <main className="grid min-h-screen place-items-center bg-background text-primary">
+      <div className="flex items-center gap-3 rounded-full bg-card px-6 py-4 shadow-lift">
         <LoaderCircle className="animate-spin" size={20} />
         <span className="text-sm font-medium">{label}</span>
       </div>
@@ -336,16 +424,16 @@ function AuthScreen({ client }: { client: SupabaseClient }) {
 
   const isRegister = mode === 'register'
   return (
-    <main className="auth-background relative grid min-h-screen place-items-center overflow-hidden bg-md3-background px-4 py-10">
-      <div className="ambient-orb pointer-events-none absolute -left-24 top-12 h-72 w-72 rounded-full bg-md3-primaryContainer/60 blur-3xl" />
-      <div className="ambient-orb ambient-orb-delayed pointer-events-none absolute -bottom-28 -right-20 h-96 w-96 rounded-full bg-md3-tertiaryContainer/50 blur-3xl" />
-      <section className="auth-panel relative w-full max-w-md rounded-[2rem] p-7 sm:p-10" key={mode}>
+    <main className="auth-background relative grid min-h-screen place-items-center overflow-hidden bg-background px-4 py-10">
+      <div className="ambient-orb pointer-events-none absolute -left-24 top-12 h-72 w-72 rounded-full bg-accent/60 blur-3xl" />
+      <div className="ambient-orb ambient-orb-delayed pointer-events-none absolute -bottom-28 -right-20 h-96 w-96 rounded-full bg-muted/50 blur-3xl" />
+      <Card className="auth-panel relative w-full max-w-md gap-0 rounded-xl p-7 sm:p-10" key={mode}>
         <BrandMark />
         <div className="mt-10">
-          <h1 className="text-[2rem] font-semibold tracking-tight text-md3-onBackground">
+          <h1 className="text-[2rem] font-semibold tracking-tight text-foreground">
             {isRegister ? 'Create your space' : 'Welcome back'}
           </h1>
-          <p className="mt-2 leading-6 text-md3-onSurfaceVariant">
+          <p className="mt-2 leading-6 text-muted-foreground">
             {isRegister
               ? 'Your account starts with a generated handle. Only your password is needed.'
               : 'Use your Sloppy handle and password to unlock your conversations.'}
@@ -354,22 +442,22 @@ function AuthScreen({ client }: { client: SupabaseClient }) {
         <form className="mt-7 space-y-4" onSubmit={submit}>
           {isRegister ? (
             <>
-              <label className="block text-sm font-medium text-md3-onSurface">
-                Preferred name <span className="font-normal text-md3-onSurfaceVariant">(optional)</span>
-                <input
+              <label className="block text-sm font-medium text-card-foreground">
+                Display name <span className="font-normal text-muted-foreground">(optional)</span>
+                <Input
                   autoComplete="name"
-                  className="auth-input mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3.5 outline-none transition focus:border-md3-primary focus:ring-4 focus:ring-md3-primary/10"
+                  className="auth-input mt-2 w-full rounded-lg border border-border bg-background px-4 py-3.5 outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10"
                   maxLength={40}
                   onChange={(event) => setDisplayName(event.target.value)}
                   placeholder="Defaults to your generated handle"
                   value={displayName}
                 />
               </label>
-              <label className="block text-sm font-medium text-md3-onSurface">
+              <label className="block text-sm font-medium text-card-foreground">
                 Password
-                <input
+                <Input
                   autoComplete="new-password"
-                  className="auth-input mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3.5 outline-none transition focus:border-md3-primary focus:ring-4 focus:ring-md3-primary/10"
+                  className="auth-input mt-2 w-full rounded-lg border border-border bg-background px-4 py-3.5 outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10"
                   maxLength={72}
                   minLength={12}
                   onChange={(event) => setPassword(event.target.value)}
@@ -379,11 +467,11 @@ function AuthScreen({ client }: { client: SupabaseClient }) {
                 />
               </label>
               <PasswordRequirements password={password} />
-              <label className="block text-sm font-medium text-md3-onSurface">
+              <label className="block text-sm font-medium text-card-foreground">
                 Confirm password
-                <input
+                <Input
                   autoComplete="new-password"
-                  className="auth-input mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3.5 outline-none transition focus:border-md3-primary focus:ring-4 focus:ring-md3-primary/10"
+                  className="auth-input mt-2 w-full rounded-lg border border-border bg-background px-4 py-3.5 outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10"
                   maxLength={72}
                   onChange={(event) => setConfirmPassword(event.target.value)}
                   required
@@ -394,12 +482,12 @@ function AuthScreen({ client }: { client: SupabaseClient }) {
             </>
           ) : (
             <>
-              <label className="block text-sm font-medium text-md3-onSurface">
+              <label className="block text-sm font-medium text-card-foreground">
                 Sloppy username
-                <input
+                <Input
                   autoCapitalize="none"
                   autoComplete="username"
-                  className="auth-input mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3.5 outline-none transition focus:border-md3-primary focus:ring-4 focus:ring-md3-primary/10"
+                  className="auth-input mt-2 w-full rounded-lg border border-border bg-background px-4 py-3.5 outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10"
                   maxLength={12}
                   onChange={(event) => setUsername(event.target.value)}
                   pattern="[a-zA-Z2-7]{12}"
@@ -407,11 +495,11 @@ function AuthScreen({ client }: { client: SupabaseClient }) {
                   value={username}
                 />
               </label>
-              <label className="block text-sm font-medium text-md3-onSurface">
+              <label className="block text-sm font-medium text-card-foreground">
                 Password
-                <input
+                <Input
                   autoComplete="current-password"
-                  className="auth-input mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3.5 outline-none transition focus:border-md3-primary focus:ring-4 focus:ring-md3-primary/10"
+                  className="auth-input mt-2 w-full rounded-lg border border-border bg-background px-4 py-3.5 outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10"
                   maxLength={72}
                   onChange={(event) => setPassword(event.target.value)}
                   required
@@ -421,24 +509,24 @@ function AuthScreen({ client }: { client: SupabaseClient }) {
               </label>
             </>
           )}
-          {error && <p role="alert" className="rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer">{error}</p>}
-          {notice && <p role="status" className="rounded-2xl bg-md3-primaryContainer px-4 py-3 text-sm leading-6 text-md3-onPrimaryContainer">{notice}</p>}
+          {error && <p role="alert" className="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</p>}
+          {notice && <p role="status" className="rounded-lg bg-accent px-4 py-3 text-sm leading-6 text-accent-foreground">{notice}</p>}
           {generatedUsername && (
             <GeneratedHandle username={generatedUsername} onDismiss={() => setGeneratedUsername('')} />
           )}
-          <button
-            className="auth-submit flex w-full items-center justify-center gap-2 rounded-full bg-md3-primary px-5 py-3.5 font-semibold text-md3-onPrimary transition hover:brightness-95 disabled:cursor-wait disabled:opacity-70"
+          <Button
+            className="auth-submit flex w-full items-center justify-center gap-2 rounded-full bg-primary px-5 py-3.5 font-semibold text-primary-foreground transition hover:brightness-95 disabled:cursor-wait disabled:opacity-70"
             disabled={busy}
             type="submit"
           >
             {busy && <LoaderCircle className="animate-spin" size={18} />}
             {isRegister ? 'Create account' : 'Sign in'}
-          </button>
+          </Button>
         </form>
-        <div className="mt-7 flex items-center justify-center gap-1 border-t border-md3-outlineVariant/50 pt-5 text-sm text-md3-onSurfaceVariant">
+        <div className="mt-7 flex items-center justify-center gap-1 border-t border-border/50 pt-5 text-sm text-muted-foreground">
           <span>{isRegister ? 'Already have a handle?' : 'New to Sloppy?'}</span>
-          <button
-            className="rounded-full px-2 py-1 font-semibold text-md3-primary hover:bg-md3-primaryContainer/60"
+          <Button
+            className="rounded-full px-2 py-1 font-semibold text-primary hover:bg-accent/60"
             onClick={() => {
               setMode(isRegister ? 'login' : 'register')
               setError('')
@@ -448,10 +536,10 @@ function AuthScreen({ client }: { client: SupabaseClient }) {
             type="button"
           >
             {isRegister ? 'Sign in' : 'Create account'}
-          </button>
+          </Button>
         </div>
         <a
-          className="mt-4 flex flex-col items-center gap-1 text-xs text-md3-onSurfaceVariant transition hover:text-md3-primary"
+          className="mt-4 flex flex-col items-center gap-1 text-xs text-muted-foreground transition hover:text-primary"
           href="https://github.com/nari442/SloppyChat"
           rel="noreferrer"
           target="_blank"
@@ -459,7 +547,7 @@ function AuthScreen({ client }: { client: SupabaseClient }) {
           <span className="inline-flex items-center gap-1.5 font-semibold"><Github size={14} /> Open source on GitHub</span>
           <span>Free to use, modify, and share under the MIT License</span>
         </a>
-      </section>
+      </Card>
     </main>
   )
 }
@@ -475,9 +563,9 @@ function PasswordRequirements({ password }: { password: string }) {
   ]
 
   return (
-    <ul aria-label="Password requirements" className="grid grid-cols-2 gap-x-3 gap-y-1.5 rounded-2xl bg-md3-surfaceContainerLow p-3 text-xs" aria-live="polite">
+    <ul aria-label="Password requirements" className="grid grid-cols-2 gap-x-3 gap-y-1.5 rounded-lg bg-muted p-3 text-xs" aria-live="polite">
       {rules.map((rule) => (
-        <li className={`flex items-center gap-1.5 ${rule.met ? 'text-md3-primary' : 'text-md3-onSurfaceVariant'}`} key={rule.label}>
+        <li className={`flex items-center gap-1.5 ${rule.met ? 'text-primary' : 'text-muted-foreground'}`} key={rule.label}>
           <Check aria-hidden="true" size={13} className={rule.met ? '' : 'opacity-30'} />
           {rule.label}
         </li>
@@ -499,22 +587,22 @@ function GeneratedHandle({ username, onDismiss }: { username: string; onDismiss:
     }
   }
   return (
-    <div className="rounded-2xl border border-md3-outlineVariant bg-md3-surfaceContainerLow p-4">
+    <div className="rounded-lg border border-border bg-muted p-4">
       <div className="flex items-center justify-between gap-3">
-        <span className="text-xs font-semibold uppercase tracking-wider text-md3-onSurfaceVariant">Your shareable handle</span>
-        <button aria-label="Dismiss handle" className="rounded-full p-1 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onDismiss} type="button">
+        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Your shareable handle</span>
+        <Button aria-label="Dismiss handle" className="rounded-full p-1 text-muted-foreground hover:bg-secondary" onClick={onDismiss} type="button">
           <X size={16} />
-        </button>
+        </Button>
       </div>
       <div className="mt-2 flex items-center justify-between gap-3">
-        <code className="text-lg font-semibold tracking-[0.12em] text-md3-onBackground">{username}</code>
-        <button className="flex items-center gap-1.5 rounded-full bg-md3-primaryContainer px-3 py-2 text-sm font-semibold text-md3-onPrimaryContainer" onClick={copyHandle} type="button">
+        <code className="text-lg font-semibold tracking-[0.12em] text-foreground">{username}</code>
+        <Button className="flex items-center gap-1.5 rounded-full bg-accent px-3 py-2 text-sm font-semibold text-accent-foreground" onClick={copyHandle} type="button">
           {copied ? <Check size={16} /> : <Copy size={16} />}
           {copied ? 'Copied' : 'Copy'}
-        </button>
+        </Button>
       </div>
-      <p className="mt-2 text-xs leading-5 text-md3-onSurfaceVariant">Save this handle. Password-only accounts cannot recover a lost handle by email.</p>
-      {copyError && <p className="mt-2 text-xs text-md3-error" role="alert">{copyError}</p>}
+      <p className="mt-2 text-xs leading-5 text-muted-foreground">Save this handle. Password-only accounts cannot recover a lost handle by email.</p>
+      {copyError && <p className="mt-2 text-xs text-destructive" role="alert">{copyError}</p>}
     </div>
   )
 }
@@ -524,13 +612,19 @@ function Workspace({
   session,
   theme,
   onThemeChange,
-  requestedHandle
+  accentColor,
+  onAccentColorChange,
+  route,
+  onNavigate
 }: {
   client: SupabaseClient
   session: Session
   theme: ThemePreference
   onThemeChange: (theme: ThemePreference) => void
-  requestedHandle: string | null
+  accentColor: string
+  onAccentColorChange: (color: AccentColor) => void
+  route: AppRoute
+  onNavigate: (route: AppRoute) => void
 }) {
   const userId = session.user.id
   const [username, setUsername] = useState('')
@@ -542,7 +636,7 @@ function Workspace({
   const [loading, setLoading] = useState(true)
   const [nicknameStorage, setNicknameStorage] = useState(() => loadConversationNicknames(userId))
   const [error, setError] = useState(nicknameStorage.error)
-  const [newChatOpen, setNewChatOpen] = useState(Boolean(requestedHandle))
+  const [newChatOpen, setNewChatOpen] = useState(false)
   const [messageRequestsOpen, setMessageRequestsOpen] = useState(false)
   const [messageRequests, setMessageRequests] = useState<IncomingMessageRequest[]>([])
   const [devicesOpen, setDevicesOpen] = useState(false)
@@ -552,10 +646,42 @@ function Workspace({
   const [nicknameConversationId, setNicknameConversationId] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [actionConversationId, setActionConversationId] = useState('')
+  const [safetyCodesOpenFor, setSafetyCodesOpenFor] = useState('')
   const [addingGroupMembersToId, setAddingGroupMembersToId] = useState('')
   const [notificationsEnabled, setNotificationsEnabled] = useState(() => (
     window.localStorage.getItem(`sloppy-notifications:${userId}`) === 'true'
   ))
+
+  useEffect(() => {
+    if (loading || deviceState?.status !== 'active') return
+
+    if (route.type === 'home') {
+      setSelectedId('')
+      setMobileChatOpen(false)
+      setNewChatOpen(false)
+      return
+    }
+
+    const targetConversation = route.type === 'direct-chat'
+      ? conversations.find((conversation) => (
+        conversation.kind === 'direct'
+        && conversation.conversation_members.some((member) => memberUsername(member) === route.handle)
+      ))
+      : conversations.find((conversation) => conversation.id === route.conversationId)
+
+    if (targetConversation) {
+      setSelectedId(targetConversation.id)
+      setMobileChatOpen(true)
+      setNewChatOpen(false)
+    } else if (route.type === 'direct-chat') {
+      setSelectedId('')
+      setMobileChatOpen(true)
+      setNewChatOpen(true)
+    } else {
+      setError('That group conversation is not available on this account.')
+      onNavigate({ type: 'home' })
+    }
+  }, [conversations, deviceState?.status, loading, onNavigate, route])
 
   useEffect(() => {
     let active = true
@@ -704,7 +830,20 @@ function Workspace({
     if (nextId) {
       setSelectedId(nextId)
       setMobileChatOpen(true)
+      const selectedConversation = nextConversations.find((conversation) => conversation.id === nextId)
+      if (selectedConversation) onNavigate(routeForConversation(selectedConversation, userId))
     }
+  }
+
+  function routeForConversation(conversation: Conversation, currentUserId: string): AppRoute {
+    if (conversation.kind === 'group') {
+      return { type: 'group-chat', conversationId: conversation.id }
+    }
+    const peerHandle = conversation.conversation_members
+      .filter((member) => member.user_id !== currentUserId)
+      .map(memberUsername)
+      .find((handle): handle is string => Boolean(handle && isValidUsername(handle)))
+    return peerHandle ? { type: 'direct-chat', handle: peerHandle } : { type: 'home' }
   }
 
   async function refreshDeviceRequests() {
@@ -803,8 +942,6 @@ function Workspace({
           firstMessage
         )
         await refreshConversations(existing.id)
-        setNewChatOpen(false)
-        clearRequestedHandleFromPath()
         return
       }
       if (!deviceState || deviceState.status !== 'active') {
@@ -812,18 +949,10 @@ function Workspace({
       }
       await sendMessageRequest(client, handle, userId, username, deviceState.vault, firstMessage)
       setMessageRequests(await loadIncomingMessageRequests(client))
-      setNewChatOpen(false)
-      clearRequestedHandleFromPath()
       return
     }
     const id = await createConversation(client, handles, title)
     await refreshConversations(id)
-    setNewChatOpen(false)
-    clearRequestedHandleFromPath()
-  }
-
-  function clearRequestedHandleFromPath() {
-    if (requestedHandle) window.history.replaceState({}, '', '/')
   }
 
   async function handleMessageRequest(request: IncomingMessageRequest, action: 'accept' | 'deny' | 'block') {
@@ -844,28 +973,28 @@ function Workspace({
 
   if (deviceState?.status === 'pending') {
     return (
-      <main className="grid min-h-screen place-items-center bg-md3-background px-5 py-10">
-        <section className="w-full max-w-lg rounded-3xl bg-md3-surface p-8 shadow-lift sm:p-10">
+      <main className="grid min-h-screen place-items-center bg-background px-5 py-10">
+        <section className="w-full max-w-lg rounded-xl bg-card p-8 shadow-lift sm:p-10">
           <BrandMark />
-          <div className="mt-8 grid h-14 w-14 place-items-center rounded-2xl bg-md3-tertiaryContainer text-md3-onTertiaryContainer">
+          <div className="mt-8 grid h-14 w-14 place-items-center rounded-lg bg-muted text-foreground">
             <Smartphone size={25} />
           </div>
-          <h1 className="mt-5 text-2xl font-semibold text-md3-onBackground">Approve this browser</h1>
-          <p className="mt-3 leading-7 text-md3-onSurfaceVariant">
-            Sign in on a trusted device for <strong className="font-semibold text-md3-onBackground">{username}</strong>. Compare this device code with the pending request before approving it.
+          <h1 className="mt-5 text-2xl font-semibold text-foreground">Approve this browser</h1>
+          <p className="mt-3 leading-7 text-muted-foreground">
+            Sign in on a trusted device for <strong className="font-semibold text-foreground">{username}</strong>. Compare this device code with the pending request before approving it.
           </p>
-          <div className="mt-4 rounded-2xl bg-md3-surfaceContainerLow p-4">
-            <p className="text-xs font-semibold uppercase tracking-wider text-md3-onSurfaceVariant">New browser code</p>
-            <code className="mt-2 block break-all text-sm font-semibold tracking-wide text-md3-onBackground">{deviceState.vault.deviceId}</code>
-            <p className="mt-2 text-xs leading-5 text-md3-onSurfaceVariant">Approval grants access to future messages only.</p>
+          <div className="mt-4 rounded-lg bg-muted p-4">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">New browser code</p>
+            <code className="mt-2 block break-all text-sm font-semibold tracking-wide text-foreground">{deviceState.vault.deviceId}</code>
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">Approval grants access to future messages only.</p>
           </div>
-          {error && <p role="alert" className="mt-4 rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer">{error}</p>}
-          <button className="mt-6 flex w-full items-center justify-center gap-2 rounded-full bg-md3-primary px-5 py-3.5 font-semibold text-md3-onPrimary" onClick={checkEnrollment} type="button">
+          {error && <p role="alert" className="mt-4 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</p>}
+          <Button className="mt-6 flex w-full items-center justify-center gap-2 rounded-full bg-primary px-5 py-3.5 font-semibold text-primary-foreground" onClick={checkEnrollment} type="button">
             Check approval
-          </button>
-          <button className="mt-3 w-full rounded-full px-5 py-3 text-sm font-semibold text-md3-onSurfaceVariant hover:bg-md3-surfaceContainerLow" onClick={signOut} type="button">
+          </Button>
+          <Button className="mt-3 w-full rounded-full px-5 py-3 text-sm font-semibold text-muted-foreground hover:bg-muted" onClick={signOut} type="button">
             Sign out
-          </button>
+          </Button>
         </section>
       </main>
     )
@@ -951,6 +1080,7 @@ function Workspace({
     if (selectedId === conversation.id) {
       setSelectedId('')
       setMobileChatOpen(false)
+      onNavigate({ type: 'home' })
     }
   }
 
@@ -979,6 +1109,7 @@ function Workspace({
     if (selectedId === conversation.id) {
       setSelectedId('')
       setMobileChatOpen(false)
+      onNavigate({ type: 'home' })
     }
   }
 
@@ -988,6 +1119,7 @@ function Workspace({
     if (selectedId === conversation.id) {
       setSelectedId('')
       setMobileChatOpen(false)
+      onNavigate({ type: 'home' })
     }
     await refreshConversations()
   }
@@ -995,18 +1127,17 @@ function Workspace({
   async function addMembersToGroup(conversation: Conversation, userIds: string[]) {
     await addGroupMembers(client, conversation.id, userIds)
     await refreshConversations()
-    setAddingGroupMembersToId('')
   }
 
   return (
-    <main className="h-[100dvh] w-full overflow-hidden bg-md3-background text-md3-onBackground">
-      <div className="app-shell flex h-full w-full overflow-hidden bg-md3-surface">
-        <aside className={`app-sidebar ${mobileChatOpen ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-md3-outlineVariant/60 bg-md3-surfaceContainerLow md:w-[320px] lg:w-[360px]`}>
+    <main className="h-[100dvh] w-full overflow-hidden bg-background text-foreground">
+      <div className="app-shell flex h-full w-full overflow-hidden bg-card">
+        <aside className={`app-sidebar ${mobileChatOpen ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-border/60 bg-muted md:w-[320px] lg:w-[360px]`}>
           <header className="flex items-center justify-between px-5 pb-4 pt-5">
             <BrandMark />
-            <button
+            <Button
               aria-label="Manage trusted devices"
-              className="relative grid h-11 w-11 place-items-center rounded-full text-md3-onSurfaceVariant transition hover:bg-md3-surfaceContainer"
+              className="relative grid h-11 w-11 place-items-center rounded-full text-muted-foreground transition hover:bg-secondary"
               onClick={() => {
                 setDevicesOpen(true)
                 void refreshDeviceRequests().catch((reason: unknown) => setError(messageFromError(reason)))
@@ -1014,33 +1145,33 @@ function Workspace({
               type="button"
             >
               <Smartphone size={19} />
-              {pendingCount > 0 && <span className="absolute right-2 top-2 h-2.5 w-2.5 rounded-full bg-md3-error ring-2 ring-md3-surfaceContainerLow" />}
-            </button>
+              {pendingCount > 0 && <span className="absolute right-2 top-2 h-2.5 w-2.5 rounded-full bg-destructive ring-2 ring-muted" />}
+            </Button>
           </header>
           <div className="px-5 pb-4">
-            <div className="flex items-center gap-2 rounded-2xl bg-md3-surface px-4 py-3 text-sm text-md3-onSurfaceVariant">
+            <div className="flex items-center gap-2 rounded-lg bg-card px-4 py-3 text-sm text-muted-foreground">
               <Search size={17} />
               <span className="truncate">Your handle</span>
-              <code className="ml-auto truncate font-semibold tracking-wider text-md3-onBackground"><Handle value={username} /></code>
-              <button aria-label="Copy your Sloppy username" className="rounded-full p-1.5 text-md3-primary hover:bg-md3-primaryContainer/60" onClick={() => void copyHandle()} type="button">
+              <code className="ml-auto truncate font-semibold tracking-wider text-foreground"><Handle value={username} /></code>
+              <Button aria-label="Copy your Sloppy username" className="rounded-full p-1.5 text-primary hover:bg-accent/60" onClick={() => void copyHandle()} type="button">
                 {handleCopied ? <Check size={15} /> : <Copy size={15} />}
-              </button>
+              </Button>
             </div>
           </div>
           <div className="flex items-center justify-between px-5 pb-3">
-            <h2 className="text-sm font-semibold text-md3-onSurfaceVariant">Conversations</h2>
-            <button
+            <h2 className="text-sm font-semibold text-muted-foreground">Conversations</h2>
+            <Button
               aria-label="New conversation"
-              className="grid h-10 w-10 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer shadow-sm transition hover:scale-[1.03]"
+              className="grid h-10 w-10 place-items-center rounded-lg bg-accent text-accent-foreground shadow-sm transition hover:scale-[1.03]"
               onClick={() => setNewChatOpen(true)}
               type="button"
             >
               <Plus size={19} />
-            </button>
+            </Button>
           </div>
           <div className="px-4 pb-3">
-            <button
-              className="flex w-full items-center justify-between rounded-2xl bg-md3-surface px-4 py-3 text-left text-sm font-semibold text-md3-onSurface transition hover:bg-md3-surfaceContainer"
+            <Button
+              className="flex w-full items-center justify-between rounded-lg bg-card px-4 py-3 text-left text-sm font-semibold text-card-foreground transition hover:bg-secondary"
               onClick={() => {
                 setMessageRequestsOpen(true)
                 void loadIncomingMessageRequests(client)
@@ -1051,73 +1182,77 @@ function Workspace({
             >
               <span>Message Requests</span>
               {messageRequests.length > 0 && (
-                <span className="grid min-h-6 min-w-6 place-items-center rounded-full bg-md3-primary text-xs font-bold text-md3-onPrimary">
+                <span className="grid min-h-6 min-w-6 place-items-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
                   {messageRequests.length}
                 </span>
               )}
-            </button>
+            </Button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
             {visibleConversations.length === 0 ? (
-              <div className="empty-state mx-2 mt-4 rounded-3xl bg-md3-surface p-5 text-center">
-                <MessageCircle className="mx-auto text-md3-primary" size={25} />
-                <p className="mt-3 text-sm font-semibold text-md3-onBackground">Start a conversation</p>
-                <p className="mt-1 text-xs leading-5 text-md3-onSurfaceVariant">Find someone by their generated Sloppy username.</p>
+              <div className="empty-state mx-2 mt-4 rounded-xl bg-card p-5 text-center">
+                <MessageCircle className="mx-auto text-primary" size={25} />
+                <p className="mt-3 text-sm font-semibold text-foreground">Start a conversation</p>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">Find someone by their generated Sloppy username.</p>
               </div>
             ) : visibleConversations.map((conversation) => {
               const members = conversation.conversation_members.length
               return (
-                <div className="conversation-item mb-1.5 flex items-center rounded-2xl" key={conversation.id}>
-                  <button
-                    className={`flex min-w-0 flex-1 items-center gap-3 rounded-2xl px-3 py-3 text-left transition ${selectedId === conversation.id ? 'bg-md3-primaryContainer/75' : 'hover:bg-md3-surface'}`}
+                <div className="conversation-item mb-1.5 flex items-center rounded-lg" key={conversation.id}>
+                  <Button
+                    className={`flex min-w-0 flex-1 items-center gap-3 rounded-lg px-3 py-3 text-left transition ${selectedId === conversation.id ? 'bg-accent/75' : 'hover:bg-card'}`}
                     onClick={() => {
                       setSelectedId(conversation.id)
                       setMobileChatOpen(true)
+                      onNavigate(routeForConversation(conversation, userId))
                     }}
                     type="button"
                   >
-                    <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-md3-surface text-md3-primary">
+                    <div className="grid h-12 w-12 shrink-0 place-items-center rounded-lg bg-card text-primary">
                       {conversation.kind === 'group' ? <Users size={20} /> : <MessageCircle size={20} />}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-semibold text-md3-onBackground">
+                      <p className="truncate text-sm font-semibold text-foreground">
                         <ConversationLabel conversation={conversation} currentUserId={userId} nickname={savedNicknames[conversation.id]} />
                       </p>
-                      <p className="mt-1 truncate text-xs text-md3-onSurfaceVariant">
+                      <p className="mt-1 truncate text-xs text-muted-foreground">
                         {conversation.kind === 'group' ? `${members} members · Encrypted` : 'Encrypted conversation'}
                       </p>
                     </div>
-                    <ChevronDown className="-rotate-90 text-md3-outline" size={16} />
-                  </button>
-                  <button aria-label="Conversation actions" className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surface" onClick={() => setActionConversationId(conversation.id)} title="Conversation actions" type="button">
+                    <ChevronDown className="-rotate-90 text-border" size={16} />
+                  </Button>
+                  <Button aria-label="Conversation actions" className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-card" onClick={() => setActionConversationId(conversation.id)} title="Conversation actions" type="button">
                     <MoreHorizontal size={18} />
-                  </button>
+                  </Button>
                 </div>
               )
             })}
           </div>
-          <footer className="flex items-center justify-between border-t border-md3-outlineVariant/60 px-5 py-4">
+          <footer className="flex items-center justify-between border-t border-border/60 px-5 py-4">
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold"><Handle value={username} /></p>
-              <p className="mt-0.5 flex items-center gap-1 text-xs text-md3-onSurfaceVariant"><ShieldCheck size={13} /> Device trusted</p>
             </div>
             <div className="flex shrink-0 items-center gap-1">
-              <button aria-label="Settings" className="grid h-10 w-10 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surface" onClick={() => setSettingsOpen(true)} title="Settings" type="button">
+              <Button aria-label="Settings" className="grid h-10 w-10 place-items-center rounded-full text-muted-foreground hover:bg-card" onClick={() => setSettingsOpen(true)} title="Settings" type="button">
                 <Settings size={18} />
-              </button>
-              <button aria-label="Sign out" className="grid h-10 w-10 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surface" onClick={signOut} title="Sign out" type="button">
+              </Button>
+              <Button aria-label="Sign out" className="grid h-10 w-10 place-items-center rounded-full text-muted-foreground hover:bg-card" onClick={signOut} title="Sign out" type="button">
                 <LogOut size={18} />
-              </button>
+              </Button>
             </div>
           </footer>
         </aside>
-        <section className={`${mobileChatOpen ? 'flex' : 'hidden md:flex'} min-w-0 flex-1 flex-col bg-md3-surface`}>
+        <section className={`${mobileChatOpen ? 'flex' : 'hidden md:flex'} min-w-0 flex-1 flex-col bg-card`}>
           {selectedConversation && deviceState ? (
             <ChatRoom
               key={selectedConversation.id}
               client={client}
               conversation={selectedConversation}
-              onBack={() => setMobileChatOpen(false)}
+              onBack={() => {
+                setSelectedId('')
+                setMobileChatOpen(false)
+                onNavigate({ type: 'home' })
+              }}
               onError={setError}
               session={session}
               vault={deviceState.vault}
@@ -1125,39 +1260,42 @@ function Workspace({
               clearedAt={conversationPreferences[selectedConversation.id]?.cleared_at}
               notificationsEnabled={notificationsEnabled}
               onEditNickname={() => setNicknameConversationId(selectedConversation.id)}
-              onManageConversation={() => setActionConversationId(selectedConversation.id)}
+              onManageConversation={() => {
+                setSafetyCodesOpenFor('')
+                setActionConversationId(selectedConversation.id)
+              }}
+              showSafetyCodes={safetyCodesOpenFor === selectedConversation.id}
+              onCloseSafetyCodes={() => setSafetyCodesOpenFor('')}
             />
           ) : (
             <div className="grid flex-1 place-items-center px-6 py-10">
               <div className="empty-state max-w-sm text-center">
-                <div className="mx-auto grid h-20 w-20 place-items-center rounded-3xl bg-md3-primaryContainer text-md3-onPrimaryContainer">
+                <div className="mx-auto grid h-20 w-20 place-items-center rounded-xl bg-accent text-accent-foreground">
                   <LockKeyhole size={32} />
                 </div>
                 <h1 className="mt-6 text-2xl font-semibold tracking-tight">A quieter kind of chat</h1>
-                <p className="mt-3 leading-7 text-md3-onSurfaceVariant">Choose a conversation or start a new one. Messages are encrypted in your browser before they reach Supabase.</p>
-                <button className="mt-6 inline-flex items-center gap-2 rounded-full bg-md3-primary px-5 py-3 font-semibold text-md3-onPrimary shadow-sm" onClick={() => setNewChatOpen(true)} type="button">
+                <p className="mt-3 leading-7 text-muted-foreground">Choose a conversation or start a new one. Messages are encrypted in your browser before they reach Supabase.</p>
+                <Button className="mt-6 inline-flex items-center gap-2 rounded-full bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm" onClick={() => setNewChatOpen(true)} type="button">
                   <Plus size={18} />
                   New conversation
-                </button>
+                </Button>
               </div>
-            </div>
-          )}
-          {error && (
-            <div className="notice-toast fixed bottom-5 left-1/2 z-40 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer shadow-lift" role="alert">
-              <ShieldAlert className="shrink-0" size={17} />
-              <span>{error}</span>
-              <button aria-label="Dismiss error" className="shrink-0 rounded-full p-1 hover:bg-black/5" onClick={() => setError('')} type="button"><X size={16} /></button>
             </div>
           )}
         </section>
       </div>
+      <ErrorToast error={error} onDismiss={() => setError('')} />
       {newChatOpen && (
         <NewConversationDialog
-          initialHandle={requestedHandle ?? ''}
+          initialHandle={route.type === 'direct-chat' ? route.handle : ''}
           acceptedContacts={acceptedContacts}
           onClose={() => {
             setNewChatOpen(false)
-            clearRequestedHandleFromPath()
+            const existing = route.type === 'direct-chat' && conversations.some((conversation) => (
+              conversation.kind === 'direct'
+              && conversation.conversation_members.some((member) => memberUsername(member) === route.handle)
+            ))
+            if (!existing && route.type !== 'group-chat') onNavigate({ type: 'home' })
           }}
           onCreate={startConversation}
         />
@@ -1211,6 +1349,8 @@ function Workspace({
               .catch((reason: unknown) => setError(messageFromError(reason)))
           }}
           onThemeChange={onThemeChange}
+          accentColor={accentColor}
+          onAccentColorChange={onAccentColorChange}
           onDisplayNameChange={setDisplayName}
           theme={theme}
           displayName={displayName}
@@ -1229,6 +1369,9 @@ function Workspace({
           }}
           onClear={() => clearConversationForMe(actionConversation)}
           onClose={() => setActionConversationId('')}
+          onViewSafetyCodes={actionConversation.id === selectedId
+            ? () => setSafetyCodesOpenFor(actionConversation.id)
+            : undefined}
           onDeleteForEveryone={() => deleteConversationForEveryone(actionConversation)}
           onHide={() => hideConversationFromMe(actionConversation)}
           onRename={() => {
@@ -1260,7 +1403,9 @@ function ChatRoom({
   clearedAt,
   notificationsEnabled,
   onEditNickname,
-  onManageConversation
+  onManageConversation,
+  showSafetyCodes,
+  onCloseSafetyCodes
 }: {
   client: SupabaseClient
   conversation: Conversation
@@ -1273,18 +1418,15 @@ function ChatRoom({
   notificationsEnabled: boolean
   onEditNickname: () => void
   onManageConversation: () => void
+  showSafetyCodes: boolean
+  onCloseSafetyCodes: () => void
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [draft, setDraft] = useState('')
   const [imageFile, setImageFile] = useState<File | null>(null)
   const [loading, setLoading] = useState(true)
   const [sending, setSending] = useState(false)
-  const [peerIdentities, setPeerIdentities] = useState<Array<{
-    userId: string
-    username: string
-    fingerprint: string
-    status: 'verified' | 'unverified' | 'changed' | 'missing' | 'conflict'
-  }>>([])
+  const [peerIdentities, setPeerIdentities] = useState<PeerIdentity[]>([])
   const [localVault, setLocalVault] = useState(vault)
   const messageEnd = useRef<HTMLDivElement>(null)
   const draftField = useRef<HTMLTextAreaElement>(null)
@@ -1468,92 +1610,48 @@ function ChatRoom({
     }
   }
 
-  const unverifiedPeers = peerIdentities.filter((peer) => peer.status !== 'verified')
-
   return (
     <>
-      <header className="chat-header flex items-center gap-3 border-b border-md3-outlineVariant/50 px-4 py-4 sm:px-7">
-        <button aria-label="Back to conversations" className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surfaceContainerLow md:hidden" onClick={onBack} type="button">
+      <header className="chat-header flex items-center gap-3 border-b border-border/50 px-4 py-4 sm:px-7">
+        <Button aria-label="Back to conversations" className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-muted md:hidden" onClick={onBack} type="button">
           <ArrowLeft size={19} />
-        </button>
-        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-md3-secondaryContainer text-md3-onSecondaryContainer">
+        </Button>
+        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-secondary text-muted-foreground">
           {conversation.kind === 'group' ? <Users size={19} /> : <MessageCircle size={19} />}
         </div>
         <div className="min-w-0 flex-1">
           <h1 className="truncate font-semibold">
             <ConversationLabel conversation={conversation} currentUserId={session.user.id} nickname={nickname} />
           </h1>
-          <p className="mt-0.5 flex items-center gap-1.5 text-xs text-md3-onSurfaceVariant">
+          <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
             <LockKeyhole size={12} />
             End-to-end encrypted
           </p>
         </div>
-        <button
+        <Button
           aria-label="Edit conversation nickname"
-          className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surfaceContainerLow"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-muted"
           onClick={onEditNickname}
           title="Edit conversation nickname"
           type="button"
         >
           <Pencil size={17} />
-        </button>
-        <button aria-label="Conversation actions" className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-md3-onSurfaceVariant hover:bg-md3-surfaceContainerLow" onClick={onManageConversation} title="Conversation actions" type="button">
+        </Button>
+        <Button aria-label="Conversation actions" className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-muted" onClick={onManageConversation} title="Conversation actions" type="button">
           <MoreHorizontal size={18} />
-        </button>
-        <div className="hidden items-center gap-2 rounded-full bg-md3-surfaceContainerLow px-3 py-2 text-xs font-medium text-md3-onSurfaceVariant sm:flex">
-          <ShieldCheck className="text-md3-primary" size={15} />
-          Only trusted devices
-        </div>
+        </Button>
       </header>
-      <div className="chat-scroll flex min-h-0 flex-1 flex-col overflow-y-auto bg-md3-background px-4 py-5 sm:px-8">
-        <div className="mx-auto mb-6 max-w-lg rounded-2xl border border-md3-outlineVariant/60 bg-md3-surface px-4 py-3 text-center text-xs leading-5 text-md3-onSurfaceVariant">
-          Messages are encrypted in your browser. The server stores ciphertext and routing metadata, not message text.
-        </div>
-        {peerIdentities.length > 0 && unverifiedPeers.length > 0 && (
-          <section className="identity-panel mx-auto mb-5 w-full max-w-3xl rounded-3xl border border-md3-tertiary/20 bg-md3-tertiaryContainer/45 p-4 sm:p-5">
-            <div className="flex items-start gap-3">
-              <ShieldAlert className="mt-0.5 shrink-0 text-md3-tertiary" size={18} />
-              <div className="min-w-0 flex-1">
-                <h2 className="text-sm font-semibold text-md3-onTertiaryContainer">Verify safety codes before chatting</h2>
-                <p className="mt-1 text-xs leading-5 text-md3-onTertiaryContainer/80">Compare each code with the person through a separate trusted channel. Sending stays locked until you verify it on this device.</p>
-              </div>
-            </div>
-            <div className="mt-4 space-y-3">
-              {unverifiedPeers.map((peer) => (
-                <div className="rounded-2xl bg-md3-surface/80 p-3 sm:flex sm:items-center sm:gap-4" key={peer.userId}>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs font-semibold"><Handle value={peer.username} /></p>
-                    <code className="mt-1 block break-all text-[10px] leading-5 tracking-wide text-md3-onSurfaceVariant">
-                      {peer.status === 'missing' ? 'No approved device yet' : peer.fingerprint}
-                    </code>
-                    {peer.status === 'changed' && <p className="mt-1 text-xs font-medium text-md3-error">The safety code changed. Verify this change independently.</p>}
-                    {peer.status === 'conflict' && <p className="mt-1 text-xs font-medium text-md3-error">The account's trusted device keys disagree. Do not send until resolved.</p>}
-                  </div>
-                  {peer.status !== 'missing' && peer.status !== 'conflict' && (
-                    <div className="mt-3 flex shrink-0 gap-2 sm:mt-0">
-                      <button className="rounded-full border border-md3-outlineVariant px-3 py-2.5 text-xs font-semibold text-md3-onSurfaceVariant" onClick={() => void copyPeerCode(peer)} type="button">
-                        Copy code
-                      </button>
-                      <button className="rounded-full bg-md3-primary px-3 py-2.5 text-xs font-semibold text-md3-onPrimary" onClick={() => void trustPeer(peer)} type="button">
-                        {peer.status === 'changed' ? 'Verify new code' : 'I compared this code'}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
+      <div className="chat-scroll flex min-h-0 flex-1 flex-col overflow-y-auto bg-background px-4 py-5 sm:px-8">
         {loading ? (
-          <div className="flex flex-1 items-center justify-center text-sm text-md3-onSurfaceVariant">
+          <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
             <LoaderCircle className="mr-2 animate-spin" size={17} /> Decrypting this device's history
           </div>
         ) : messages.length === 0 ? (
           <div className="flex flex-1 items-center justify-center text-center">
             <div className="max-w-xs">
-              <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><LockKeyhole size={22} /></div>
+              <div className="mx-auto grid h-14 w-14 place-items-center rounded-lg bg-accent text-accent-foreground"><LockKeyhole size={22} /></div>
               <p className="mt-4 font-semibold">This conversation is ready</p>
-              <p className="mt-1 text-sm leading-6 text-md3-onSurfaceVariant">Send the first encrypted message.</p>
+              <p className="mt-1 text-sm leading-6 text-muted-foreground">Send the first encrypted message.</p>
             </div>
           </div>
         ) : (
@@ -1562,12 +1660,12 @@ function ChatRoom({
               const ownMessage = message.sender_id === session.user.id
               const sender = conversation.conversation_members.find((member) => member.user_id === message.sender_id)
               const senderName = sender ? memberDisplayName(sender) : undefined
-              const imageAttachment = message.untrusted ? null : parseImageAttachment(message.text)
+              const imageAttachment = parseImageAttachment(message.text)
               return (
                 <div className={`message-row flex ${ownMessage ? 'justify-end' : 'justify-start'}`} key={message.id}>
-                  <div className={`max-w-[85%] rounded-3xl px-4 py-3 sm:max-w-[75%] ${ownMessage ? 'rounded-br-lg bg-md3-primary text-md3-onPrimary' : 'rounded-bl-lg bg-md3-surfaceContainer text-md3-onSurface'}`}>
+                  <div className={`max-w-[85%] rounded-xl px-4 py-3 sm:max-w-[75%] ${ownMessage ? 'rounded-br-lg bg-primary text-primary-foreground' : 'rounded-bl-lg bg-secondary text-card-foreground'}`}>
                     {!ownMessage && conversation.kind === 'group' && (
-                      <p className="mb-1 text-[11px] font-semibold text-md3-primary">
+                      <p className="mb-1 text-[11px] font-semibold text-primary">
                         {senderName ? <Handle value={senderName} /> : 'Group member'}
                       </p>
                     )}
@@ -1575,13 +1673,11 @@ function ChatRoom({
                       <EncryptedImageView client={client} conversationId={conversation.id} attachment={imageAttachment} />
                     ) : (
                       <p className={`whitespace-pre-wrap break-words text-sm leading-6 ${message.text === null ? 'italic opacity-75' : ''}`}>
-                        {message.untrusted
-                          ? 'Message hidden until this sender identity is verified'
-                          : message.text ?? 'Not encrypted for this device'}
+                        {message.text ?? 'Not encrypted for this device'}
                       </p>
                     )}
                     {imageAttachment?.caption && <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{imageAttachment.caption}</p>}
-                    <time className={`mt-1 block text-right text-[10px] ${ownMessage ? 'text-md3-onPrimary/70' : 'text-md3-onSurfaceVariant'}`} dateTime={message.created_at}>
+                    <time className={`mt-1 block text-right text-[10px] ${ownMessage ? 'text-primary-foreground/70' : 'text-muted-foreground'}`} dateTime={message.created_at}>
                       {new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(message.created_at))}
                     </time>
                   </div>
@@ -1592,18 +1688,18 @@ function ChatRoom({
           </div>
         )}
       </div>
-      <form className="message-composer border-t border-md3-outlineVariant/50 bg-md3-surface p-4 sm:px-7 sm:py-5" onSubmit={submitMessage}>
+      <form className="message-composer border-t border-border/50 bg-card p-4 sm:px-7 sm:py-5" onSubmit={submitMessage}>
         {imageFile && (
-          <div className="mx-auto mb-2 flex max-w-3xl items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-2 text-xs">
-            <ImagePlus className="shrink-0 text-md3-primary" size={16} />
+          <div className="mx-auto mb-2 flex max-w-3xl items-center gap-3 rounded-lg bg-muted px-4 py-2 text-xs">
+            <ImagePlus className="shrink-0 text-primary" size={16} />
             <span className="min-w-0 flex-1 truncate">{imageFile.name} · {(imageFile.size / 1024).toFixed(0)} KB</span>
-            <button aria-label="Remove image attachment" className="grid h-8 w-8 place-items-center rounded-full hover:bg-md3-surface" onClick={() => setImageFile(null)} type="button"><X size={15} /></button>
+            <Button aria-label="Remove image attachment" className="grid h-8 w-8 place-items-center rounded-full hover:bg-card" onClick={() => setImageFile(null)} type="button"><X size={15} /></Button>
           </div>
         )}
-        <div className={`message-entry mx-auto flex max-w-3xl items-end gap-3 rounded-3xl bg-md3-surfaceContainerLow p-2 pl-4 ${draft ? 'has-draft' : ''}`}>
-          <label aria-label="Attach an image up to 2 MB" className="grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-2xl text-md3-onSurfaceVariant hover:bg-md3-surface" title="Attach image (max 2 MB)">
+        <div className={`message-entry mx-auto flex max-w-3xl items-end gap-3 rounded-xl bg-muted p-2 pl-4 ${draft ? 'has-draft' : ''}`}>
+          <label aria-label="Attach an image up to 2 MB" className="grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-lg text-muted-foreground hover:bg-card" title="Attach image (max 2 MB)">
             <ImagePlus size={19} />
-            <input accept="image/png,image/jpeg,image/webp,image/gif,image/avif" className="sr-only" onChange={(event) => {
+            <Input accept="image/png,image/jpeg,image/webp,image/gif,image/avif" className="sr-only" onChange={(event) => {
               const file = event.target.files?.[0]
               event.target.value = ''
               if (!file) return
@@ -1612,9 +1708,9 @@ function ChatRoom({
                 .catch((reason: unknown) => onError(messageFromError(reason)))
             }} type="file" />
           </label>
-          <textarea
+          <Textarea
             aria-label="Message"
-        className="message-textarea max-h-36 min-h-11 flex-1 resize-none bg-transparent py-2.5 text-sm leading-6 placeholder:text-md3-outline"
+        className="message-textarea max-h-36 min-h-11 flex-1 resize-none bg-transparent py-2.5 text-sm leading-6 placeholder:text-border"
             maxLength={4000}
             onChange={(event) => setDraft(event.target.value)}
         ref={draftField}
@@ -1628,17 +1724,26 @@ function ChatRoom({
             rows={1}
             value={draft}
           />
-          <button
+          <Button
             aria-label="Send encrypted message"
-            className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-md3-primary text-md3-onPrimary shadow-sm transition hover:brightness-95 disabled:opacity-50"
-            disabled={sending || (!draft.trim() && !imageFile) || unverifiedPeers.length > 0}
+            className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground shadow-sm transition hover:brightness-95 disabled:opacity-50"
+            disabled={sending || (!draft.trim() && !imageFile)}
             type="submit"
           >
             {sending ? <LoaderCircle className="animate-spin" size={18} /> : <Send size={18} />}
-          </button>
+          </Button>
         </div>
-        <p className="mx-auto mt-2 max-w-3xl px-2 text-[10px] text-md3-onSurfaceVariant">Enter to send · Shift + Enter for a new line</p>
+        <p className="mx-auto mt-2 max-w-3xl px-2 text-[10px] text-muted-foreground">Enter to send · Shift + Enter for a new line</p>
       </form>
+      {showSafetyCodes && (
+        <SafetyCodesDialog
+          peers={peerIdentities}
+          loading={loading}
+          onClose={onCloseSafetyCodes}
+          onCopyCode={copyPeerCode}
+          onTrustPeer={trustPeer}
+        />
+      )}
     </>
   )
 }
@@ -1654,9 +1759,25 @@ function EncryptedImageView({
 }) {
   const [imageUrl, setImageUrl] = useState('')
   const [error, setError] = useState('')
+  const [shouldLoad, setShouldLoad] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
   const { path, key, iv, mediaType, caption } = attachment
 
   useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        setShouldLoad(true)
+        observer.disconnect()
+      }
+    }, { rootMargin: '200px' })
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (!shouldLoad) return
     let active = true
     let objectUrl = ''
     void decryptImageAttachment(client, conversationId, { path, key, iv, mediaType, caption })
@@ -1672,11 +1793,21 @@ function EncryptedImageView({
       active = false
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [client, conversationId, path, key, iv, mediaType, caption])
+  }, [client, conversationId, path, key, iv, mediaType, caption, shouldLoad])
 
-  if (error) return <p className="text-xs text-md3-error" role="alert">Image unavailable: {error}</p>
-  if (!imageUrl) return <div aria-label="Decrypting image" className="grid h-32 w-48 place-items-center rounded-2xl bg-md3-surfaceContainerLow"><LoaderCircle className="animate-spin text-md3-primary" size={20} /></div>
-  return <img alt={caption || 'Encrypted image attachment'} className="max-h-80 max-w-full rounded-2xl object-contain" loading="lazy" src={imageUrl} />
+  return (
+    <div className="min-h-12 min-w-12" ref={containerRef}>
+      {error ? (
+        <p className="text-xs text-destructive" role="alert">Image unavailable: {error}</p>
+      ) : imageUrl ? (
+        <img alt={caption || 'Encrypted image attachment'} className="max-h-80 max-w-full rounded-lg object-contain" loading="lazy" src={imageUrl} />
+      ) : shouldLoad ? (
+        <div aria-label="Decrypting image" className="grid h-32 w-48 place-items-center rounded-lg bg-muted"><LoaderCircle className="animate-spin text-primary" size={20} /></div>
+      ) : (
+        <div aria-label="Image will load when visible" className="h-12 w-12 rounded-lg bg-muted" />
+      )}
+    </div>
+  )
 }
 
 function MessageRequestsDialog({
@@ -1692,6 +1823,7 @@ function MessageRequestsDialog({
   requests: IncomingMessageRequest[]
   vault: DeviceVault
 }) {
+  const closeDialog = useDialogClose(onClose)
   const [selectedId, setSelectedId] = useState('')
   const [preview, setPreview] = useState<{ requestId: string; message: string; error: string } | null>(null)
   const [busyAction, setBusyAction] = useState('')
@@ -1726,7 +1858,7 @@ function MessageRequestsDialog({
     if (!selectedRequest) {
       return
     }
-    if (action === 'block' && !window.confirm('Block this sender? They will not be able to contact you again or participate in shared conversations.')) {
+    if (action === 'block' && !window.confirm('Block this sender? They will not be able to message you again or participate in shared conversations.')) {
       return
     }
     setBusyAction(action)
@@ -1734,7 +1866,7 @@ function MessageRequestsDialog({
     try {
       await onRespond(selectedRequest, action)
       if (action === 'accept') {
-        onClose()
+        closeDialog()
       } else {
         setSelectedId('')
       }
@@ -1749,21 +1881,21 @@ function MessageRequestsDialog({
     <DialogFrame onClose={onClose}>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><MessageCircle size={21} /></div>
+          <div className="grid h-12 w-12 place-items-center rounded-lg bg-accent text-accent-foreground"><MessageCircle size={21} /></div>
           <h2 className="mt-4 text-xl font-semibold">Message Requests</h2>
-          <p className="mt-1 text-sm leading-6 text-md3-onSurfaceVariant">Open a request to preview its first message before deciding.</p>
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">Open a request to preview its first message before deciding.</p>
         </div>
-        <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+        <Button aria-label="Close" className="rounded-full p-2 text-muted-foreground hover:bg-secondary" onClick={() => closeDialog()} type="button"><X size={18} /></Button>
       </div>
       {!selectedRequest ? (
         <div className="mt-6 space-y-2">
           {requests.length === 0 ? (
-            <div className="rounded-2xl bg-md3-surfaceContainerLow px-4 py-6 text-center text-sm text-md3-onSurfaceVariant">
+            <div className="rounded-lg bg-muted px-4 py-6 text-center text-sm text-muted-foreground">
               No new message requests.
             </div>
           ) : requests.map((request) => (
-            <button
-              className="flex w-full items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3 text-left transition hover:bg-md3-surfaceContainer"
+            <Button
+              className="flex w-full items-center gap-3 rounded-lg bg-muted px-4 py-3 text-left transition hover:bg-secondary"
               key={request.request_id}
               onClick={() => {
                 setError('')
@@ -1771,64 +1903,64 @@ function MessageRequestsDialog({
               }}
               type="button"
             >
-              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-md3-primaryContainer text-md3-onPrimaryContainer"><MessageCircle size={17} /></span>
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-accent text-accent-foreground"><MessageCircle size={17} /></span>
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-semibold">Message request</span>
-                <span className="mt-1 block truncate text-xs text-md3-onSurfaceVariant">
+                <span className="mt-1 block truncate text-xs text-muted-foreground">
                   <Handle value={request.sender_username} />
                 </span>
               </span>
-              <span className="text-xs text-md3-primary">Preview</span>
-            </button>
+              <span className="text-xs text-primary">Preview</span>
+            </Button>
           ))}
         </div>
       ) : (
         <div className="mt-6">
-          <button
-            className="mb-4 rounded-full px-3 py-2 text-sm font-semibold text-md3-primary hover:bg-md3-primaryContainer/40"
+          <Button
+            className="mb-4 rounded-full px-3 py-2 text-sm font-semibold text-primary hover:bg-accent/40"
             onClick={() => setSelectedId('')}
             type="button"
           >
             <span aria-hidden="true">←</span> All requests
-          </button>
+          </Button>
           <div className="flex items-center gap-2 text-sm font-semibold">
             <span>From</span>
             <Handle value={selectedRequest.sender_username} />
           </div>
-          <div className="request-message mt-4 min-h-24 whitespace-pre-wrap break-words rounded-3xl rounded-bl-lg bg-md3-surfaceContainerLow px-4 py-4 text-sm leading-6">
+          <div className="request-message mt-4 min-h-24 whitespace-pre-wrap break-words rounded-xl rounded-bl-lg bg-muted px-4 py-4 text-sm leading-6">
             {!selectedPreview ? (
-              <span className="flex items-center gap-2 text-md3-onSurfaceVariant"><LoaderCircle className="animate-spin" size={16} />Decrypting request</span>
+              <span className="flex items-center gap-2 text-muted-foreground"><LoaderCircle className="animate-spin" size={16} />Decrypting request</span>
             ) : selectedPreview.message}
           </div>
-          <div className="mt-4 rounded-2xl border border-md3-tertiary/20 bg-md3-tertiaryContainer/40 px-4 py-3 text-xs leading-5 text-md3-onTertiaryContainer">
-            This sender’s identity is not verified yet. Treat the message as untrusted and do not open links. After accepting, compare the safety code before continuing.
+          <div className="mt-4 rounded-lg border border-chart-3/20 bg-muted/40 px-4 py-3 text-xs leading-5 text-foreground">
+            This sender’s identity has not been independently confirmed. Be cautious with links. Comparing safety codes is optional and can help confirm the sender.
           </div>
-          {(selectedPreview?.error || error) && <p className="mt-4 rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{selectedPreview?.error || error}</p>}
+          {(selectedPreview?.error || error) && <p className="mt-4 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive" role="alert">{selectedPreview?.error || error}</p>}
           <div className="mt-5 grid grid-cols-3 gap-2">
-            <button
-              className="rounded-full border border-md3-outlineVariant px-3 py-3 text-sm font-semibold text-md3-onSurfaceVariant hover:bg-md3-surfaceContainerLow disabled:opacity-50"
+            <Button
+              className="rounded-full border border-border px-3 py-3 text-sm font-semibold text-muted-foreground hover:bg-muted disabled:opacity-50"
               disabled={Boolean(busyAction)}
               onClick={() => void respond('deny')}
               type="button"
             >
               {busyAction === 'deny' ? 'Denying…' : 'Deny'}
-            </button>
-            <button
-              className="rounded-full border border-md3-error/40 px-3 py-3 text-sm font-semibold text-md3-error hover:bg-md3-errorContainer disabled:opacity-50"
+            </Button>
+            <Button
+              className="rounded-full border border-destructive/40 px-3 py-3 text-sm font-semibold text-destructive hover:bg-destructive/10 disabled:opacity-50"
               disabled={Boolean(busyAction)}
               onClick={() => void respond('block')}
               type="button"
             >
               {busyAction === 'block' ? 'Blocking…' : 'Block'}
-            </button>
-            <button
-              className="rounded-full bg-md3-primary px-3 py-3 text-sm font-semibold text-md3-onPrimary hover:brightness-95 disabled:opacity-50"
+            </Button>
+            <Button
+              className="rounded-full bg-primary px-3 py-3 text-sm font-semibold text-primary-foreground hover:brightness-95 disabled:opacity-50"
               disabled={Boolean(busyAction) || !selectedPreview || Boolean(selectedPreview.error)}
               onClick={() => void respond('accept')}
               type="button"
             >
               {busyAction === 'accept' ? 'Accepting…' : 'Accept'}
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -1847,6 +1979,7 @@ function AddGroupMembersDialog({
   onAdd: (userIds: string[]) => Promise<void>
   onClose: () => void
 }) {
+  const closeDialog = useDialogClose(onClose)
   const [search, setSearch] = useState('')
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
@@ -1866,6 +1999,7 @@ function AddGroupMembersDialog({
     setError('')
     try {
       await onAdd(selectedIds)
+      closeDialog()
     } catch (reason) {
       setError(messageFromError(reason))
     } finally {
@@ -1877,32 +2011,32 @@ function AddGroupMembersDialog({
     <DialogFrame onClose={onClose}>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><UserPlus size={19} /></div>
+          <div className="grid h-11 w-11 place-items-center rounded-lg bg-accent text-accent-foreground"><UserPlus size={19} /></div>
           <h2 className="mt-3 text-xl font-semibold">Add group members</h2>
-          <p className="mt-1 text-sm text-md3-onSurfaceVariant">Choose accepted contacts. Group chats support up to 20 members.</p>
+          <p className="mt-1 text-sm text-muted-foreground">Choose friends. Group chats support up to 20 members.</p>
         </div>
-        <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+        <Button aria-label="Close" className="rounded-full p-2 text-muted-foreground hover:bg-secondary" onClick={() => closeDialog()} type="button"><X size={18} /></Button>
       </div>
       <form className="mt-5 space-y-4" onSubmit={(event) => void submit(event)}>
-        <input
+        <Input
           autoFocus
-          aria-label="Search accepted contacts"
-          className="w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 text-sm"
+          aria-label="Search friends"
+          className="w-full rounded-lg border border-border bg-background px-4 py-3 text-sm"
           onChange={(event) => setSearch(event.target.value)}
           placeholder="Search names or handles"
           value={search}
         />
-        <div className="max-h-64 space-y-1 overflow-y-auto rounded-2xl bg-md3-surfaceContainerLow p-2">
+        <div className="max-h-64 space-y-1 overflow-y-auto rounded-lg bg-muted p-2">
           {filteredContacts.length === 0 ? (
-            <p className="px-3 py-5 text-center text-sm text-md3-onSurfaceVariant">No eligible accepted contacts.</p>
+            <p className="px-3 py-5 text-center text-sm text-muted-foreground">No eligible friends.</p>
           ) : filteredContacts.map((contact) => {
             const checked = selectedIds.includes(contact.userId)
             const atCapacity = currentMemberCount + selectedIds.length >= 20
             return (
-              <label className={`flex items-center gap-3 rounded-xl px-3 py-2.5 ${atCapacity && !checked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:bg-md3-surface'}`} key={contact.userId}>
-                <input
+              <label className={`flex items-center gap-3 rounded-xl px-3 py-2.5 ${atCapacity && !checked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:bg-card'}`} key={contact.userId}>
+                <Input
                   checked={checked}
-                  className="h-4 w-4 accent-[rgb(var(--md3-primary))]"
+                  className="h-4 min-h-0 w-4 accent-primary"
                   disabled={atCapacity && !checked}
                   onChange={(event) => setSelectedIds((current) => event.target.checked
                     ? [...current, contact.userId]
@@ -1910,18 +2044,80 @@ function AddGroupMembersDialog({
                   type="checkbox"
                 />
                 <span className="min-w-0 flex-1 truncate text-sm font-medium">{contact.displayName}</span>
-                <code className="truncate text-xs text-md3-onSurfaceVariant">{contact.username}</code>
+                <code className="truncate text-xs text-muted-foreground">{contact.username}</code>
               </label>
             )
           })}
         </div>
-        <p className="text-xs text-md3-onSurfaceVariant">{selectedIds.length} selected · {capacity} spots available</p>
-        {error && <p className="rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{error}</p>}
-        <button className="flex w-full items-center justify-center gap-2 rounded-full bg-md3-primary px-4 py-3 font-semibold text-md3-onPrimary disabled:opacity-60" disabled={busy || selectedIds.length === 0} type="submit">
+        <p className="text-xs text-muted-foreground">{selectedIds.length} selected · {capacity} spots available</p>
+        {error && <p className="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive" role="alert">{error}</p>}
+        <Button className="flex w-full items-center justify-center gap-2 rounded-full bg-primary px-4 py-3 font-semibold text-primary-foreground disabled:opacity-60" disabled={busy || selectedIds.length === 0} type="submit">
           {busy ? <LoaderCircle className="animate-spin" size={17} /> : <UserPlus size={17} />}
           Add {selectedIds.length || ''} {selectedIds.length === 1 ? 'member' : 'members'}
-        </button>
+        </Button>
       </form>
+    </DialogFrame>
+  )
+}
+
+function SafetyCodesDialog({
+  peers,
+  loading,
+  onClose,
+  onCopyCode,
+  onTrustPeer
+}: {
+  peers: PeerIdentity[]
+  loading: boolean
+  onClose: () => void
+  onCopyCode: (peer: PeerIdentity) => Promise<void>
+  onTrustPeer: (peer: PeerIdentity) => Promise<void>
+}) {
+  const closeDialog = useDialogClose(onClose)
+  return (
+    <DialogFrame onClose={onClose}>
+      <header className="flex items-start justify-between gap-4">
+        <div>
+          <div className="grid h-11 w-11 place-items-center rounded-lg bg-accent text-accent-foreground"><ShieldAlert size={20} /></div>
+          <h2 className="mt-3 text-xl font-semibold">Conversation safety codes</h2>
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">Comparing a code through a separate trusted channel is optional and can help confirm an identity.</p>
+        </div>
+        <Button aria-label="Close safety codes" className="rounded-full p-2 text-muted-foreground hover:bg-secondary" onClick={() => closeDialog()} type="button"><X size={18} /></Button>
+      </header>
+      {loading && peers.length === 0 ? (
+        <div className="mt-5 flex items-center gap-2 rounded-lg bg-muted p-4 text-sm text-muted-foreground">
+          <LoaderCircle className="animate-spin" size={17} />
+          Preparing safety codes…
+        </div>
+      ) : peers.length === 0 ? (
+        <p className="mt-5 rounded-lg bg-muted p-4 text-sm text-muted-foreground">No other identities are in this conversation.</p>
+      ) : (
+        <div className="mt-5 max-h-[55vh] space-y-3 overflow-y-auto">
+          {peers.map((peer) => (
+            <section className="rounded-lg border border-border/60 bg-muted/50 p-4" key={peer.userId}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-semibold"><Handle value={peer.username} /></p>
+                {peer.status !== 'missing' && peer.status !== 'conflict' && (
+                  <div className="flex flex-wrap gap-2">
+                    <Button className="rounded-full border border-border px-3 py-2 text-xs font-semibold text-muted-foreground" onClick={() => void onCopyCode(peer)} type="button">Copy code</Button>
+                    {peer.status !== 'verified' && (
+                      <Button className="rounded-full bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground" onClick={() => void onTrustPeer(peer)} type="button">
+                        {peer.status === 'changed' ? 'Verify new code' : 'I compared this code'}
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+              <code className="mt-3 block break-all text-[11px] leading-5 tracking-wide text-muted-foreground">
+                {peer.status === 'missing' ? 'No approved device yet' : peer.fingerprint}
+              </code>
+              {peer.status === 'verified' && <p className="mt-2 text-xs font-medium text-primary">Key verified on this device</p>}
+              {peer.status === 'changed' && <p className="mt-2 text-xs font-medium text-destructive">This code differs from the one saved on this device. Confirm it independently if you want to verify the change.</p>}
+              {peer.status === 'conflict' && <p className="mt-2 text-xs font-medium text-destructive">The account's trusted device keys disagree. Do not send until resolved.</p>}
+            </section>
+          ))}
+        </div>
+      )}
     </DialogFrame>
   )
 }
@@ -1936,7 +2132,8 @@ function ConversationActionsDialog({
   onClose,
   onDeleteForEveryone,
   onHide,
-  onRename
+  onRename,
+  onViewSafetyCodes
 }: {
   conversation: Conversation
   currentUserId: string
@@ -1948,7 +2145,9 @@ function ConversationActionsDialog({
   onDeleteForEveryone: () => Promise<void>
   onHide: () => Promise<void>
   onRename: () => void
+  onViewSafetyCodes?: () => void
 }) {
+  const closeDialog = useDialogClose(onClose)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const otherMembers = conversation.conversation_members.filter((member) => member.user_id !== currentUserId)
@@ -1969,45 +2168,46 @@ function ConversationActionsDialog({
     <DialogFrame onClose={onClose}>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><MoreHorizontal size={20} /></div>
+          <div className="grid h-11 w-11 place-items-center rounded-lg bg-accent text-accent-foreground"><MoreHorizontal size={20} /></div>
           <h2 className="mt-3 text-xl font-semibold">Conversation actions</h2>
-          <p className="mt-1 text-sm text-md3-onSurfaceVariant"><ConversationLabel conversation={conversation} currentUserId={currentUserId} nickname={nickname} /></p>
+          <p className="mt-1 text-sm text-muted-foreground"><ConversationLabel conversation={conversation} currentUserId={currentUserId} nickname={nickname} /></p>
         </div>
-        <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+        <Button aria-label="Close" className="rounded-full p-2 text-muted-foreground hover:bg-secondary" onClick={() => closeDialog()} type="button"><X size={18} /></Button>
       </div>
       <div className="mt-5 grid gap-2">
-        {conversation.kind === 'group' && <button className="flex items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={onAddMembers} type="button"><UserPlus size={17} /> Add members</button>}
-        <button className="flex items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={onRename} type="button"><Pencil size={17} /> Rename for me</button>
-        <button className="flex items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={() => {
+        {onViewSafetyCodes && <Button className="flex items-center gap-3 rounded-lg bg-muted px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={() => closeDialog(onViewSafetyCodes)} type="button"><ShieldAlert size={17} /> View safety codes</Button>}
+        {conversation.kind === 'group' && <Button className="flex items-center gap-3 rounded-lg bg-muted px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={() => closeDialog(onAddMembers)} type="button"><UserPlus size={17} /> Add members</Button>}
+        <Button className="flex items-center gap-3 rounded-lg bg-muted px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={() => closeDialog(onRename)} type="button"><Pencil size={17} /> Rename for me</Button>
+        <Button className="flex items-center gap-3 rounded-lg bg-muted px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={() => {
           if (window.confirm('Clear your visible history for this conversation? Other participants will keep their messages.')) {
             void run(onClear)
           }
-        }} type="button"><Eraser size={17} /> Clear history for me</button>
-        <button className="flex items-center gap-3 rounded-2xl bg-md3-surfaceContainerLow px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={() => void run(onHide)} type="button"><Archive size={17} /> Remove from my conversations</button>
+        }} type="button"><Eraser size={17} /> Clear history for me</Button>
+        <Button className="flex items-center gap-3 rounded-lg bg-muted px-4 py-3 text-left text-sm font-semibold" disabled={busy} onClick={() => void run(onHide)} type="button"><Archive size={17} /> Remove from my conversations</Button>
       </div>
-      <div className="mt-5 border-t border-md3-outlineVariant/60 pt-4">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-md3-onSurfaceVariant">Block a user</h3>
+      <div className="mt-5 border-t border-border/60 pt-4">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Block a user</h3>
         <div className="mt-2 space-y-2">
           {otherMembers.map((member) => {
             const handle = memberUsername(member) ?? 'Sloppy user'
             return (
-              <button className="flex w-full items-center gap-3 rounded-2xl border border-md3-error/30 px-4 py-3 text-left text-sm font-semibold text-md3-error" disabled={busy} key={member.user_id} onClick={() => {
+              <Button className="flex w-full items-center gap-3 rounded-lg border border-destructive/30 px-4 py-3 text-left text-sm font-semibold text-destructive" disabled={busy} key={member.user_id} onClick={() => {
                 if (window.confirm(`Block ${handle}? You will lose access to shared conversations and neither of you can send new requests.`)) {
                   void run(() => onBlock(member.user_id))
                 }
-              }} type="button"><Ban size={17} /> <Handle value={handle} /></button>
+              }} type="button"><Ban size={17} /> <Handle value={handle} /></Button>
             )
           })}
         </div>
       </div>
       {conversation.kind === 'direct' && (
-        <button className="mt-5 flex w-full items-center gap-3 rounded-2xl border border-md3-error/40 px-4 py-3 text-left text-sm font-semibold text-md3-error" disabled={busy} onClick={() => {
+        <Button className="mt-5 flex w-full items-center gap-3 rounded-lg border border-destructive/40 px-4 py-3 text-left text-sm font-semibold text-destructive" disabled={busy} onClick={() => {
           if (window.confirm('Permanently delete this direct conversation and its encrypted history for both people? This cannot be undone.')) {
             void run(onDeleteForEveryone)
           }
-        }} type="button"><Trash2 size={17} /> Delete for both people</button>
+        }} type="button"><Trash2 size={17} /> Delete for both people</Button>
       )}
-      {error && <p className="mt-4 rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{error}</p>}
+      {error && <p className="mt-4 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive" role="alert">{error}</p>}
     </DialogFrame>
   )
 }
@@ -2025,6 +2225,7 @@ function NicknameDialog({
   onClose: () => void
   onSave: (nickname: string) => void
 }) {
+  const closeDialog = useDialogClose(onClose)
   const [value, setValue] = useState(nickname)
   const members = conversationMemberNames(conversation, currentUserId)
 
@@ -2032,9 +2233,9 @@ function NicknameDialog({
     <DialogFrame onClose={onClose}>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><Pencil size={20} /></div>
+          <div className="grid h-12 w-12 place-items-center rounded-lg bg-accent text-accent-foreground"><Pencil size={20} /></div>
           <h2 className="mt-4 text-xl font-semibold">Conversation nickname</h2>
-          <p className="mt-1 text-sm leading-6 text-md3-onSurfaceVariant">
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">
             {conversation.kind === 'group' ? (
               <>
                 Group with {members.map((member, index) => (
@@ -2047,7 +2248,7 @@ function NicknameDialog({
             ) : <Handle value={members[0] ?? 'Direct conversation'} />}
           </p>
         </div>
-        <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+        <Button aria-label="Close" className="rounded-full p-2 text-muted-foreground hover:bg-secondary" onClick={() => closeDialog()} type="button"><X size={18} /></Button>
       </div>
       <form className="mt-6 space-y-4" onSubmit={(event) => {
         event.preventDefault()
@@ -2055,33 +2256,33 @@ function NicknameDialog({
       }}>
         <label className="block text-sm font-medium">
           Nickname
-          <input
+          <Input
             autoFocus
-            className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+            className="mt-2 w-full rounded-lg border border-border bg-background px-4 py-3 outline-none focus:border-primary"
             maxLength={40}
             onChange={(event) => setValue(event.target.value)}
-            placeholder={conversation.kind === 'group' ? conversation.title || 'Group name' : 'Contact name'}
+            placeholder={conversation.kind === 'group' ? conversation.title || 'Group name' : 'Friend name'}
             value={value}
           />
         </label>
-        <p className="text-xs leading-5 text-md3-onSurfaceVariant">
+        <p className="text-xs leading-5 text-muted-foreground">
           Nicknames are saved only in this browser. {conversation.kind === 'group'
-            ? 'The group name and member preferred names remain visible beside it.'
-            : 'The contact preferred name remains visible beside it.'}
+            ? 'The group name and member display names remain visible beside it.'
+            : 'The friend display name remains visible beside it.'}
         </p>
         <div className="flex gap-3">
           {nickname && (
-            <button
-              className="flex-1 rounded-full border border-md3-outlineVariant px-4 py-3 text-sm font-semibold text-md3-onSurfaceVariant hover:bg-md3-surfaceContainerLow"
+            <Button
+              className="flex-1 rounded-full border border-border px-4 py-3 text-sm font-semibold text-muted-foreground hover:bg-muted"
               onClick={() => onSave('')}
               type="button"
             >
               Remove
-            </button>
+            </Button>
           )}
-          <button className="flex-1 rounded-full bg-md3-primary px-4 py-3 text-sm font-semibold text-md3-onPrimary" type="submit">
+          <Button className="flex-1 rounded-full bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground" type="submit">
             Save nickname
-          </button>
+          </Button>
         </div>
       </form>
     </DialogFrame>
@@ -2099,6 +2300,7 @@ function NewConversationDialog({
   onClose: () => void
   onCreate: (usernames: string[], title: string, firstMessage: string) => Promise<void>
 }) {
+  const closeDialog = useDialogClose(onClose)
   const [mode, setMode] = useState<'direct' | 'group'>('direct')
   const [handles, setHandles] = useState(initialHandle)
   const [title, setTitle] = useState('')
@@ -2122,7 +2324,7 @@ function NewConversationDialog({
       ? acceptedContacts.filter((contact) => selectedContactIds.includes(contact.userId)).map((contact) => contact.username)
       : handles.split(',').map((handle) => handle.trim().toLowerCase()).filter(Boolean)
     if (mode === 'group' && names.length < 2) {
-      setError('Choose at least two accepted contacts for a group.')
+      setError('Choose at least two friends for a group.')
       return
     }
     if (names.length === 0) {
@@ -2144,6 +2346,7 @@ function NewConversationDialog({
     setBusy(true)
     try {
       await onCreate(names, title, firstMessage.trim())
+      closeDialog()
     } catch (reason) {
       setError(messageFromError(reason))
     } finally {
@@ -2154,9 +2357,9 @@ function NewConversationDialog({
     <DialogFrame onClose={onClose}>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><MessageCircle size={21} /></div>
+          <div className="grid h-12 w-12 place-items-center rounded-lg bg-accent text-accent-foreground"><MessageCircle size={21} /></div>
           <h2 className="mt-4 text-xl font-semibold">New conversation</h2>
-          <p className="mt-1 text-sm leading-6 text-md3-onSurfaceVariant">
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">
             {isExistingConversation
               ? 'Send a message in your existing encrypted conversation.'
               : isDirectRequest
@@ -2164,20 +2367,20 @@ function NewConversationDialog({
                 : 'Start a group with people who already have a direct conversation with you.'}
           </p>
         </div>
-        <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+        <Button aria-label="Close" className="rounded-full p-2 text-muted-foreground hover:bg-secondary" onClick={() => closeDialog()} type="button"><X size={18} /></Button>
       </div>
       <form className="mt-6 space-y-4" onSubmit={submit}>
-        <div aria-label="Conversation type" className="grid grid-cols-2 rounded-2xl bg-md3-surfaceContainerLow p-1" role="group">
-          <button aria-pressed={mode === 'direct'} className={`rounded-xl px-4 py-2.5 text-sm font-semibold ${mode === 'direct' ? 'bg-md3-surface text-md3-onSurface shadow-sm' : 'text-md3-onSurfaceVariant'}`} onClick={() => setMode('direct')} type="button">Direct</button>
-          <button aria-pressed={mode === 'group'} className={`rounded-xl px-4 py-2.5 text-sm font-semibold ${mode === 'group' ? 'bg-md3-surface text-md3-onSurface shadow-sm' : 'text-md3-onSurfaceVariant'}`} onClick={() => setMode('group')} type="button">Group</button>
+        <div aria-label="Conversation type" className="grid grid-cols-2 rounded-lg bg-muted p-1" role="group">
+          <Button aria-pressed={mode === 'direct'} className={`rounded-xl px-4 py-2.5 text-sm font-semibold ${mode === 'direct' ? 'bg-card text-card-foreground shadow-sm' : 'text-muted-foreground'}`} onClick={() => setMode('direct')} type="button">Direct</Button>
+          <Button aria-pressed={mode === 'group'} className={`rounded-xl px-4 py-2.5 text-sm font-semibold ${mode === 'group' ? 'bg-card text-card-foreground shadow-sm' : 'text-muted-foreground'}`} onClick={() => setMode('group')} type="button">Group</Button>
         </div>
         {mode === 'direct' ? (
           <>
             <label className="block text-sm font-medium">
               Sloppy handle
-              <input
+              <Input
                 autoFocus
-                className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+                className="mt-2 w-full rounded-lg border border-border bg-background px-4 py-3 outline-none focus:border-primary"
                 onChange={(event) => setHandles(event.target.value)}
                 placeholder="Enter a handle"
                 required
@@ -2187,8 +2390,8 @@ function NewConversationDialog({
             {isDirectRequest && (
               <label className="block text-sm font-medium">
                 {isExistingConversation ? 'Message' : 'First message'}
-                <textarea
-                  className="mt-2 min-h-28 w-full resize-y rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+                <Textarea
+                  className="mt-2 min-h-28 w-full resize-y rounded-lg border border-border bg-background px-4 py-3 outline-none focus:border-primary"
                   maxLength={4000}
                   onChange={(event) => setFirstMessage(event.target.value)}
                   placeholder={isExistingConversation ? 'Write an encrypted message' : 'Write a short introduction'}
@@ -2201,38 +2404,38 @@ function NewConversationDialog({
         ) : (
           <>
             <label className="block text-sm font-medium">
-              Find accepted contacts
-              <input
+              Find friends
+              <Input
                 autoComplete="off"
-                className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+                className="mt-2 w-full rounded-lg border border-border bg-background px-4 py-3 outline-none focus:border-primary"
                 onChange={(event) => setContactSearch(event.target.value)}
                 placeholder="Search names or handles"
                 value={contactSearch}
               />
             </label>
-            <div className="max-h-56 space-y-1 overflow-y-auto rounded-2xl bg-md3-surfaceContainerLow p-2">
+            <div className="max-h-56 space-y-1 overflow-y-auto rounded-lg bg-muted p-2">
               {filteredContacts.length === 0 ? (
-                <p className="px-3 py-4 text-center text-sm text-md3-onSurfaceVariant">No accepted contacts found.</p>
+                <p className="px-3 py-4 text-center text-sm text-muted-foreground">No friends found.</p>
               ) : filteredContacts.map((contact) => (
-                <label className="flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2.5 hover:bg-md3-surface" key={contact.userId}>
-                  <input
+                <label className="flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2.5 hover:bg-card" key={contact.userId}>
+                  <Input
                     checked={selectedContactIds.includes(contact.userId)}
-                    className="h-4 w-4 accent-[rgb(var(--md3-primary))]"
+                    className="h-4 min-h-0 w-4 accent-primary"
                     onChange={(event) => setSelectedContactIds((current) => event.target.checked
                       ? [...current, contact.userId]
                       : current.filter((id) => id !== contact.userId))}
                     type="checkbox"
                   />
                   <span className="min-w-0 flex-1 truncate text-sm font-medium">{contact.displayName}</span>
-                  <code className="truncate text-xs text-md3-onSurfaceVariant">{contact.username}</code>
+                  <code className="truncate text-xs text-muted-foreground">{contact.username}</code>
                 </label>
               ))}
             </div>
-            <p className="text-xs text-md3-onSurfaceVariant">{selectedContactIds.length} selected · Select at least 2. Contacts must already have accepted a direct request.</p>
+            <p className="text-xs text-muted-foreground">{selectedContactIds.length} selected · Select at least 2. Friends must already have accepted a direct request.</p>
             <label className="block text-sm font-medium">
-              Group name <span className="font-normal text-md3-onSurfaceVariant">(optional)</span>
-              <input
-                className="mt-2 w-full rounded-2xl border border-md3-outlineVariant bg-md3-background px-4 py-3 outline-none focus:border-md3-primary"
+              Group name <span className="font-normal text-muted-foreground">(optional)</span>
+              <Input
+                className="mt-2 w-full rounded-lg border border-border bg-background px-4 py-3 outline-none focus:border-primary"
                 maxLength={80}
                 onChange={(event) => setTitle(event.target.value)}
                 placeholder="Name this group"
@@ -2241,11 +2444,11 @@ function NewConversationDialog({
             </label>
           </>
         )}
-        {error && <p className="rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{error}</p>}
-        <button className="flex w-full items-center justify-center gap-2 rounded-full bg-md3-primary px-5 py-3.5 font-semibold text-md3-onPrimary disabled:opacity-60" disabled={busy} type="submit">
+        {error && <p className="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive" role="alert">{error}</p>}
+        <Button className="flex w-full items-center justify-center gap-2 rounded-full bg-primary px-5 py-3.5 font-semibold text-primary-foreground disabled:opacity-60" disabled={busy} type="submit">
           {busy ? <LoaderCircle className="animate-spin" size={18} /> : <Plus size={18} />}
           {mode === 'group' ? 'Create group' : isExistingConversation ? 'Send message' : 'Send message request'}
-        </button>
+        </Button>
       </form>
     </DialogFrame>
   )
@@ -2270,6 +2473,7 @@ function DeviceDialog({
   pendingDevices: StoredDevice[]
   trustedDevices: StoredDevice[]
 }) {
+  const closeDialog = useDialogClose(onClose)
   const [refreshing, setRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState('')
   const [approvalError, setApprovalError] = useState('')
@@ -2288,24 +2492,24 @@ function DeviceDialog({
     <DialogFrame onClose={onClose}>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-md3-tertiaryContainer text-md3-onTertiaryContainer"><Smartphone size={21} /></div>
+          <div className="grid h-12 w-12 place-items-center rounded-lg bg-muted text-foreground"><Smartphone size={21} /></div>
           <h2 className="mt-4 text-xl font-semibold">Trusted devices</h2>
-          <p className="mt-1 text-sm leading-6 text-md3-onSurfaceVariant">Compare each request code with the new browser before approving. It will not receive earlier messages.</p>
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">Compare each request code with the new browser before approving. It will not receive earlier messages.</p>
         </div>
-        <button aria-label="Close" className="rounded-full p-2 text-md3-onSurfaceVariant hover:bg-md3-surfaceContainer" onClick={onClose} type="button"><X size={18} /></button>
+        <Button aria-label="Close" className="rounded-full p-2 text-muted-foreground hover:bg-secondary" onClick={() => closeDialog()} type="button"><X size={18} /></Button>
       </div>
       <div className="mt-6 space-y-3">
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-md3-onSurfaceVariant">Approved browsers</h3>
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Approved browsers</h3>
         {trustedDevices.map((device) => (
-          <div className="flex items-center gap-3 rounded-2xl border border-md3-outlineVariant/70 p-4" key={device.device_id}>
-            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-md3-primaryContainer text-md3-onPrimaryContainer"><ShieldCheck size={18} /></div>
+          <div className="flex items-center gap-3 rounded-lg border border-border/70 p-4" key={device.device_id}>
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-accent text-accent-foreground"><ShieldCheck size={18} /></div>
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold">{device.label}{device.device_id === currentDeviceId ? ' · This browser' : ''}</p>
-              <p className="truncate text-xs text-md3-onSurfaceVariant">{device.device_id}</p>
+              <p className="truncate text-xs text-muted-foreground">{device.device_id}</p>
             </div>
             {device.device_id !== currentDeviceId && (
-              <button
-                className="rounded-full border border-md3-outlineVariant px-3 py-2 text-xs font-semibold text-md3-error disabled:opacity-50"
+              <Button
+                className="rounded-full border border-border px-3 py-2 text-xs font-semibold text-destructive disabled:opacity-50"
                 disabled={busyDeviceId === device.device_id}
                 onClick={() => {
                   setApprovalError('')
@@ -2314,22 +2518,22 @@ function DeviceDialog({
                 type="button"
               >
                 Revoke
-              </button>
+              </Button>
             )}
           </div>
         ))}
-        <h3 className="pt-3 text-xs font-semibold uppercase tracking-wider text-md3-onSurfaceVariant">Pending requests</h3>
+        <h3 className="pt-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Pending requests</h3>
         {pendingDevices.length === 0 ? (
-          <div className="rounded-2xl bg-md3-surfaceContainerLow p-4 text-sm text-md3-onSurfaceVariant">No pending device requests.</div>
+          <div className="rounded-lg bg-muted p-4 text-sm text-muted-foreground">No pending device requests.</div>
         ) : pendingDevices.map((device) => (
-          <div className="flex items-center gap-3 rounded-2xl border border-md3-outlineVariant/70 p-4" key={device.device_id}>
-            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-md3-surfaceContainer text-md3-primary"><Smartphone size={18} /></div>
+          <div className="flex items-center gap-3 rounded-lg border border-border/70 p-4" key={device.device_id}>
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-secondary text-primary"><Smartphone size={18} /></div>
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold">{device.label}</p>
-              <p className="truncate text-xs text-md3-onSurfaceVariant">Code: {device.device_id}</p>
+              <p className="truncate text-xs text-muted-foreground">Code: {device.device_id}</p>
             </div>
-            <button
-              className="rounded-full bg-md3-primaryContainer px-3 py-2 text-xs font-semibold text-md3-onPrimaryContainer disabled:opacity-50"
+            <Button
+              className="rounded-full bg-accent px-3 py-2 text-xs font-semibold text-accent-foreground disabled:opacity-50"
               disabled={busyDeviceId === device.device_id}
               onClick={() => {
                 setApprovalError('')
@@ -2338,46 +2542,66 @@ function DeviceDialog({
               type="button"
             >
               {busyDeviceId === device.device_id ? 'Approving' : 'Approve'}
-            </button>
+            </Button>
           </div>
         ))}
       </div>
-      {approvalError && <p className="mt-4 rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{approvalError}</p>}
-      {refreshError && <p className="mt-4 rounded-2xl bg-md3-errorContainer px-4 py-3 text-sm text-md3-onErrorContainer" role="alert">{refreshError}</p>}
-      <button className="mt-5 flex w-full items-center justify-center gap-2 rounded-full border border-md3-outlineVariant px-5 py-3 text-sm font-semibold hover:bg-md3-surfaceContainerLow disabled:opacity-60" disabled={refreshing} onClick={() => void refresh()} type="button">
+      {approvalError && <p className="mt-4 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive" role="alert">{approvalError}</p>}
+      {refreshError && <p className="mt-4 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive" role="alert">{refreshError}</p>}
+      <Button className="mt-5 flex w-full items-center justify-center gap-2 rounded-full border border-border px-5 py-3 text-sm font-semibold hover:bg-muted disabled:opacity-60" disabled={refreshing} onClick={() => void refresh()} type="button">
         {refreshing ? <LoaderCircle className="animate-spin" size={17} /> : <ShieldCheck size={17} />}
         Refresh requests
-      </button>
+      </Button>
     </DialogFrame>
   )
 }
 
 function DialogFrame({ children, onClose }: { children: ReactNode; onClose: () => void }) {
+  const [open, setOpen] = useState(true)
+  const closeTimer = useRef<number | null>(null)
+  const isClosing = useRef(false)
+  const requestClose = useCallback((afterClose?: () => void) => {
+    if (isClosing.current) return
+    isClosing.current = true
+    setOpen(false)
+    const delay = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 210
+    closeTimer.current = window.setTimeout(() => {
+      onClose()
+      afterClose?.()
+    }, delay)
+  }, [onClose])
+
+  useEffect(() => () => {
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current)
+  }, [])
+
   return (
-    <div className="dialog-backdrop fixed inset-0 z-50 grid place-items-center bg-md3-onBackground/35 p-4 backdrop-blur-sm" onMouseDown={(event) => {
-      if (event.target === event.currentTarget) {
-        onClose()
-      }
-    }}>
-      <section aria-modal="true" className="dialog-panel max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl bg-md3-surface p-6 shadow-lift sm:p-8" role="dialog">
-        {children}
-      </section>
-    </div>
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!nextOpen) requestClose() }}>
+      <DialogCloseContext.Provider value={requestClose}>
+        <DialogContent
+          aria-label="Sloppy Chat dialog"
+          className="dialog-panel max-h-[90vh] w-full max-w-lg overflow-y-auto p-6 sm:max-w-lg sm:p-8"
+          showCloseButton={false}
+        >
+          {children}
+        </DialogContent>
+      </DialogCloseContext.Provider>
+    </Dialog>
   )
 }
 
 function ProblemScreen({ error, onSignOut }: { error: string; onSignOut: () => void }) {
   return (
-    <main className="grid min-h-screen place-items-center bg-md3-background px-5 py-10">
-      <section className="w-full max-w-lg rounded-3xl bg-md3-surface p-8 shadow-lift">
+    <main className="grid min-h-screen place-items-center bg-background px-5 py-10">
+      <section className="w-full max-w-lg rounded-xl bg-card p-8 shadow-lift">
         <BrandMark />
-        <div className="mt-8 grid h-14 w-14 place-items-center rounded-2xl bg-md3-errorContainer text-md3-onErrorContainer"><ShieldAlert size={25} /></div>
+        <div className="mt-8 grid h-14 w-14 place-items-center rounded-lg bg-destructive/10 text-destructive"><ShieldAlert size={25} /></div>
         <h1 className="mt-5 text-2xl font-semibold">Could not open your workspace</h1>
-        <p className="mt-3 leading-7 text-md3-onSurfaceVariant">{error}</p>
-        <button className="mt-6 flex items-center gap-2 rounded-full bg-md3-surfaceContainer px-5 py-3 text-sm font-semibold" onClick={onSignOut} type="button">
+        <p className="mt-3 leading-7 text-muted-foreground">{error}</p>
+        <Button className="mt-6 flex items-center gap-2 rounded-full bg-secondary px-5 py-3 text-sm font-semibold" onClick={onSignOut} type="button">
           <LogOut size={17} />
           Sign out
-        </button>
+        </Button>
       </section>
     </main>
   )

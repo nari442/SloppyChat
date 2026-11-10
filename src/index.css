@@ -1,87 +1,24 @@
+@import "@fontsource-variable/nunito-sans";
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
   color-scheme: light;
-  --md3-primary: 53 107 77;
-  --md3-on-primary: 255 255 255;
-  --md3-primary-container: 183 241 207;
-  --md3-on-primary-container: 0 33 16;
-  --md3-secondary: 79 99 85;
-  --md3-on-secondary: 255 255 255;
-  --md3-secondary-container: 210 232 214;
-  --md3-on-secondary-container: 12 31 19;
-  --md3-tertiary: 59 100 112;
-  --md3-on-tertiary: 255 255 255;
-  --md3-tertiary-container: 191 234 246;
-  --md3-on-tertiary-container: 0 31 39;
-  --md3-error: 186 26 26;
-  --md3-on-error: 255 255 255;
-  --md3-error-container: 255 218 214;
-  --md3-on-error-container: 65 0 2;
-  --md3-background: 247 248 242;
-  --md3-on-background: 25 29 25;
-  --md3-surface: 252 253 249;
-  --md3-on-surface: 25 29 25;
-  --md3-surface-variant: 223 229 220;
-  --md3-on-surface-variant: 65 73 65;
-  --md3-outline: 113 121 112;
-  --md3-outline-variant: 193 201 191;
-  --md3-surface-container-low: 241 243 237;
-  --md3-surface-container: 235 238 231;
-  --md3-surface-container-high: 229 233 225;
-  --md3-surface-container-highest: 223 227 219;
-  --md3-inverse-surface: 46 50 46;
-  --md3-inverse-on-surface: 239 241 235;
-  --md3-inverse-primary: 155 212 178;
-  --md3-shadow: rgba(24, 53, 36, 0.3);
-  font-family: "Manrope Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-optical-sizing: auto;
   font-weight: 400;
-  background: rgb(var(--md3-background));
-  color: rgb(var(--md3-on-background));
+  background: var(--background);
+  color: var(--foreground);
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
 
 [data-theme="dark"] {
   color-scheme: dark;
-  --md3-primary: 155 212 178;
-  --md3-on-primary: 0 57 31;
-  --md3-primary-container: 43 78 55;
-  --md3-on-primary-container: 199 239 211;
-  --md3-secondary: 185 204 187;
-  --md3-on-secondary: 36 52 41;
-  --md3-secondary-container: 55 73 60;
-  --md3-on-secondary-container: 213 231 215;
-  --md3-tertiary: 163 206 218;
-  --md3-on-tertiary: 8 53 64;
-  --md3-tertiary-container: 38 76 86;
-  --md3-on-tertiary-container: 196 231 239;
-  --md3-error: 255 180 171;
-  --md3-on-error: 105 0 5;
-  --md3-error-container: 147 0 10;
-  --md3-on-error-container: 255 218 214;
-  --md3-background: 15 17 16;
-  --md3-on-background: 226 228 222;
-  --md3-surface: 22 25 23;
-  --md3-on-surface: 226 228 222;
-  --md3-surface-variant: 66 73 66;
-  --md3-on-surface-variant: 194 201 193;
-  --md3-outline: 139 147 138;
-  --md3-outline-variant: 66 73 66;
-  --md3-surface-container-low: 27 31 28;
-  --md3-surface-container: 33 38 34;
-  --md3-surface-container-high: 41 47 42;
-  --md3-surface-container-highest: 49 56 50;
-  --md3-inverse-surface: 226 228 222;
-  --md3-inverse-on-surface: 46 50 46;
-  --md3-inverse-primary: 53 107 77;
-  --md3-shadow: rgba(0, 0, 0, 0.45);
 }
 
 * {
@@ -93,8 +30,8 @@ body {
   min-height: 100vh;
   margin: 0;
   background:
-    radial-gradient(ellipse at 12% 8%, rgb(var(--md3-primary) / 0.06), transparent 34rem),
-    rgb(var(--md3-background));
+    radial-gradient(ellipse at 12% 8%, color-mix(in srgb, var(--primary) 6%, transparent), transparent 34rem),
+    var(--background);
 }
 
 button,
@@ -110,19 +47,19 @@ button {
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible {
-  outline: 3px solid rgb(var(--md3-primary) / 0.55);
+  outline: 3px solid color-mix(in srgb, var(--primary) 55%, transparent);
   outline-offset: 3px;
 }
 
 .message-entry {
-  border: 1px solid rgb(var(--md3-outline-variant) / 0.7);
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
   box-shadow: 0 2px 6px rgb(0 0 0 / 0.025);
   transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
 }
 
 .message-entry:focus-within {
-  border-color: rgb(var(--md3-primary) / 0.72);
-  box-shadow: 0 0 0 3px rgb(var(--md3-primary) / 0.08), 0 5px 16px rgb(0 0 0 / 0.04);
+  border-color: color-mix(in srgb, var(--primary) 72%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 8%, transparent), 0 5px 16px rgb(0 0 0 / 0.04);
 }
 
 .message-textarea:focus-visible {
@@ -132,43 +69,43 @@ textarea:focus-visible {
 
 .auth-background {
   background:
-    radial-gradient(ellipse at 12% 12%, rgb(var(--md3-primary) / 0.12), transparent 30rem),
-    radial-gradient(ellipse at 88% 88%, rgb(var(--md3-tertiary) / 0.1), transparent 32rem),
-    rgb(var(--md3-background));
+    radial-gradient(ellipse at 12% 12%, color-mix(in srgb, var(--primary) 12%, transparent), transparent 30rem),
+    radial-gradient(ellipse at 88% 88%, color-mix(in srgb, var(--chart-3) 10%, transparent), transparent 32rem),
+    var(--background);
 }
 
 .auth-panel {
   animation: rise-enter 620ms cubic-bezier(.2,.8,.2,1) both;
-  border: 1px solid rgb(var(--md3-outline-variant) / 0.56);
-  background: rgb(var(--md3-surface-container-low));
+  border: 1px solid color-mix(in srgb, var(--border) 56%, transparent);
+  background: var(--card);
   box-shadow:
-    0 34px 90px -44px var(--md3-shadow),
+    0 34px 90px -44px color-mix(in srgb, var(--foreground) 25%, transparent),
     0 2px 8px rgb(0 0 0 / 0.035);
 }
 
 .auth-input {
-  color: rgb(var(--md3-on-surface));
+  color: var(--foreground);
   box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.025);
   transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
 }
 
 .auth-input:focus {
   transform: translateY(-1px);
-  box-shadow: 0 0 0 4px rgb(var(--md3-primary) / 0.1);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 10%, transparent);
 }
 
 .auth-input::placeholder {
-  color: rgb(var(--md3-on-surface-variant) / 0.72);
+  color: color-mix(in srgb, var(--muted-foreground) 72%, transparent);
 }
 
 .auth-submit {
-  box-shadow: 0 8px 18px -10px rgb(var(--md3-primary) / 0.85);
+  box-shadow: 0 8px 18px -10px color-mix(in srgb, var(--primary) 85%, transparent);
   transition: transform 180ms ease, box-shadow 180ms ease, filter 180ms ease;
 }
 
 .auth-submit:hover:not(:disabled) {
   transform: translateY(-2px);
-  box-shadow: 0 12px 24px -12px rgb(var(--md3-primary) / 0.95);
+  box-shadow: 0 12px 24px -12px color-mix(in srgb, var(--primary) 95%, transparent);
 }
 
 .app-shell {
@@ -198,8 +135,21 @@ textarea:focus-visible {
 }
 
 .conversation-item {
-  animation: rise-enter 420ms cubic-bezier(.2,.8,.2,1) both;
-  transition: background-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+  animation: fade-enter 240ms ease both;
+  transition: background-color 180ms ease, transform 180ms ease, box-shadow 180ms ease, opacity 180ms ease;
+}
+
+.conversation-item > button:first-child > div:first-child {
+  transition: transform 220ms cubic-bezier(.2,.8,.2,1), background-color 180ms ease;
+}
+
+.conversation-item > button:first-child:hover > div:first-child {
+  transform: scale(1.06) rotate(-3deg);
+  background-color: color-mix(in srgb, var(--accent) 70%, var(--card));
+}
+
+.message-row > div {
+  transition: transform 180ms ease, box-shadow 180ms ease;
 }
 
 .conversation-item:nth-child(2) {
@@ -220,10 +170,6 @@ textarea:focus-visible {
 
 .chat-scroll {
   animation: content-enter 500ms ease both;
-}
-
-.identity-panel {
-  animation: rise-enter 500ms cubic-bezier(.2,.8,.2,1) both;
 }
 
 .message-row {
@@ -248,35 +194,56 @@ textarea:focus-visible {
 }
 
 .dialog-backdrop {
-  animation: backdrop-enter 180ms ease both;
+  opacity: 1;
+  transition: opacity 180ms ease;
 }
 
 .dialog-panel {
-  animation: dialog-enter 320ms cubic-bezier(.2,.8,.2,1) both;
+  opacity: 1;
+  scale: 1;
+  translate: 0 0;
+  transition: opacity 200ms ease, scale 200ms cubic-bezier(.2,.8,.2,1), translate 200ms cubic-bezier(.2,.8,.2,1);
 }
 
-.settings-dialog-panel > section {
-  animation: rise-enter 380ms cubic-bezier(.2,.8,.2,1) both;
+.dialog-backdrop[data-closed] {
+  opacity: 0;
 }
 
-.settings-dialog-panel > section:nth-of-type(2) {
-  animation-delay: 45ms;
+.dialog-panel[data-closed] {
+  opacity: 0;
+  scale: 0.97;
+  translate: 0 8px;
 }
 
-.settings-dialog-panel > section:nth-of-type(3) {
-  animation-delay: 90ms;
+@starting-style {
+  .dialog-backdrop[data-open] {
+    opacity: 0;
+  }
+
+  .dialog-panel[data-open] {
+    opacity: 0;
+    scale: 0.97;
+    translate: 0 8px;
+  }
+
+  .notice-toast:not(.notice-toast-closed) {
+    opacity: 0;
+    translate: 0 8px;
+  }
 }
 
-.settings-dialog-panel > section:nth-of-type(4) {
-  animation-delay: 135ms;
-}
-
-.settings-dialog-panel > section:nth-of-type(5) {
-  animation-delay: 180ms;
+.settings-dialog-panel [role="tabpanel"] {
+  animation: rise-enter 240ms cubic-bezier(.2,.8,.2,1) both;
 }
 
 .notice-toast {
-  animation: toast-enter 300ms cubic-bezier(.2,.8,.2,1) both;
+  opacity: 1;
+  transition: opacity 180ms ease, translate 180ms cubic-bezier(.2,.8,.2,1);
+}
+
+.notice-toast-closed {
+  opacity: 0;
+  translate: 0 8px;
 }
 
 .ambient-orb {
@@ -287,13 +254,18 @@ textarea:focus-visible {
   animation-delay: -6s;
 }
 
-.brand-mark img {
+.brand-mark-icon {
+  display: block;
+  background-image: var(--brand-icon, url("./assets/sloppychat-purple.svg"));
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
   transition: transform 300ms cubic-bezier(.2,.8,.2,1), filter 300ms ease;
 }
 
-.brand-mark:hover img {
+.brand-mark:hover .brand-mark-icon {
   transform: rotate(-7deg) scale(1.08);
-  filter: drop-shadow(0 6px 12px rgb(var(--md3-primary) / 0.2));
+  filter: drop-shadow(0 6px 12px color-mix(in srgb, var(--primary) 20%, transparent));
 }
 
 button:not(:disabled) {
@@ -304,6 +276,27 @@ button:not(:disabled) {
 
 button:not(:disabled):active {
   transform: scale(0.96);
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .conversation-item:hover {
+    transform: translateX(3px);
+  }
+
+  .message-row > div:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 20px -14px color-mix(in srgb, var(--foreground) 32%, transparent);
+  }
+
+}
+
+@keyframes fade-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes shell-enter {
@@ -379,37 +372,6 @@ button:not(:disabled):active {
   }
 }
 
-@keyframes backdrop-enter {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes dialog-enter {
-  from {
-    opacity: 0;
-    transform: translateY(14px) scale(0.97);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes toast-enter {
-  from {
-    opacity: 0;
-    transform: translate(-50%, 12px);
-  }
-  to {
-    opacity: 1;
-    transform: translate(-50%, 0);
-  }
-}
-
 @keyframes ambient-drift {
   from {
     transform: translate3d(-12px, -8px, 0) scale(0.94);
@@ -432,11 +394,94 @@ button:not(:disabled):active {
 
 @media (max-width: 639px) {
   .auth-panel {
-    border-radius: 1.75rem;
+    border-radius: var(--radius);
   }
 }
 
 ::selection {
-  color: #10251c;
-  background: #b7f1cf;
+color: var(--primary-foreground);
+background: var(--primary);
+}
+
+@layer base {
+  :root {
+    --font-heading: var(--font-sans);
+    --font-sans: 'Nunito Sans Variable', sans-serif;
+  }
+  :root {
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.145 0 0);
+    --primary: var(--brand-color, oklch(0.55 0.24 300));
+    --primary-foreground: var(--brand-foreground, oklch(0.985 0 0));
+    --secondary: oklch(0.967 0.001 286.375);
+    --secondary-foreground: oklch(0.21 0.006 285.885);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --accent: color-mix(in srgb, var(--brand-color, #7c3aed) 12%, white);
+    --accent-foreground: var(--brand-color, #7c3aed);
+    --destructive: oklch(0.577 0.245 27.325);
+    --border: oklch(0.922 0 0);
+    --input: oklch(0.922 0 0);
+    --ring: oklch(0.708 0 0);
+    --chart-1: oklch(0.72 0.2 300);
+    --chart-2: oklch(0.64 0.23 315);
+    --chart-3: oklch(0.58 0.24 285);
+    --chart-4: oklch(0.5 0.22 270);
+    --chart-5: oklch(0.45 0.2 330);
+    --radius: 0.875rem;
+    --sidebar: oklch(0.985 0 0);
+    --sidebar-foreground: oklch(0.145 0 0);
+    --sidebar-primary: var(--primary);
+    --sidebar-primary-foreground: var(--primary-foreground);
+    --sidebar-accent: var(--accent);
+    --sidebar-accent-foreground: var(--accent-foreground);
+    --sidebar-border: oklch(0.922 0 0);
+    --sidebar-ring: oklch(0.708 0 0);
+  }
+  [data-theme="dark"] {
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: var(--brand-dark-color, oklch(0.72 0.19 300));
+    --primary-foreground: var(--brand-dark-foreground, oklch(0.18 0.03 300));
+    --secondary: oklch(0.274 0.006 286.033);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: color-mix(in srgb, var(--brand-dark-color, #a78bfa) 22%, black);
+    --accent-foreground: var(--brand-dark-color, #a78bfa);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.556 0 0);
+    --chart-1: oklch(0.8 0.17 300);
+    --chart-2: oklch(0.72 0.2 315);
+    --chart-3: oklch(0.68 0.2 285);
+    --chart-4: oklch(0.63 0.19 270);
+    --chart-5: oklch(0.75 0.18 330);
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-primary: var(--primary);
+    --sidebar-primary-foreground: var(--primary-foreground);
+    --sidebar-accent: var(--accent);
+    --sidebar-accent-foreground: var(--accent-foreground);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.556 0 0);
+  }
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
 }
