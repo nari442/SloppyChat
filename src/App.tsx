@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { Analytics } from '@vercel/analytics/react'
 import {
   ArrowLeft,
   Archive,
@@ -262,7 +263,12 @@ function App() {
     screen = <Workspace client={client} session={session} theme={theme} onThemeChange={setTheme} accentColor={accentColor} onAccentColorChange={setAccentColor} route={route} onNavigate={navigateToRoute} />
   }
 
-  return <>{screen}</>
+  return (
+    <>
+      {screen}
+      <Analytics />
+    </>
+  )
 }
 
 function SetupNotice({ error }: { error: string }) {
